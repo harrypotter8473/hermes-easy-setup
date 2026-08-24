@@ -21,7 +21,7 @@ function Save-HermesInstallState {
     [System.IO.File]::WriteAllText($temporary, ($State | ConvertTo-Json -Depth 14), (New-Object System.Text.UTF8Encoding $false))
     try {
         if (Test-Path -LiteralPath $LiteralPath -PathType Leaf) {
-            [System.IO.File]::Replace($temporary, $LiteralPath, $null, $true)
+            [System.IO.File]::Replace($temporary, $LiteralPath, [System.Management.Automation.Language.NullString]::Value, $true)
         } else {
             [System.IO.File]::Move($temporary, $LiteralPath)
         }

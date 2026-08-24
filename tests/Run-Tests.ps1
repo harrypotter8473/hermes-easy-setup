@@ -104,6 +104,13 @@ try {
     Assert-True (-not (Test-HermesStateCanResume -State $roundTrip -Plan $planC -Manifest $baseManifest)) 'different plan checkpoint rejected'
     Assert-Equal 'Succeeded' (Get-HermesStageRecord -State $roundTrip -Name 'uv').status 'stage status persisted'
 
+    $state.status = 'Failed'
+    [void](Save-HermesInstallState -LiteralPath $statePath -State $state)
+    $replacedState = Read-HermesInstallState -LiteralPath $statePath
+    Assert-Equal 'Failed' $replacedState.status 'existing state file atomically replaced'
+    $stateTemporaryFiles = @(Get-ChildItem -LiteralPath (Split-Path -Parent $statePath) -Filter '.state-*.tmp' -File -Force)
+    Assert-Equal 0 $stateTemporaryFiles.Count 'state replacement leaves no temporary file'
+
     $fixture = Join-Path $testRootFull 'fixture-install.ps1'
     $fixtureScript = 'param([switch]$Manifest)' + [Environment]::NewLine + 'if($Manifest){''{"protocol_version":1,"stages":[]}''}'
     [System.IO.File]::WriteAllText($fixture, $fixtureScript, (New-Object System.Text.UTF8Encoding $false))

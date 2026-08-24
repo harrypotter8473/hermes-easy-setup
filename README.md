@@ -6,7 +6,7 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 
 ## 현재 상태
 
-- 버전 `0.1.0` Windows 네이티브 MVP
+- 버전 `0.1.1` Windows 네이티브 MVP
 - Windows 10/11 x64에서 로컬 및 CI 검증
 - ARM64는 Hermes upstream Tier 1 대상이지만 이 마법사는 아직 실기기 미검증
 - Windows PowerShell 5.1과 PowerShell 7 단위 테스트
