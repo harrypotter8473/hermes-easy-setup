@@ -1,0 +1,49 @@
+name: Windows install E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-install-e2e
+  cancel-in-progress: false
+
+jobs:
+  native-install:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install without credentials or setup
+        shell: powershell
+        run: |
+          $systemPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          $e2eRoot = Join-Path $env:RUNNER_TEMP 'hermes-easy-setup-e2e'
+          $hermesHome = Join-Path $e2eRoot 'hermes'
+          $installDir = Join-Path $hermesHome 'hermes-agent'
+          $runtimeRoot = Join-Path $e2eRoot 'wizard-runtime'
+          $cli = Join-Path $env:GITHUB_WORKSPACE 'HermesEasySetup.ps1'
+
+          $planText = & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Plan -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -SetupMode Later -Json
+          if ($LASTEXITCODE -ne 0) { throw "Plan failed with exit code $LASTEXITCODE" }
+          $plan = $planText | ConvertFrom-Json
+
+          & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -SetupMode Later -ExpectedPlanFingerprint $plan.Fingerprint -JsonEvents
+          if ($LASTEXITCODE -ne 0) { throw "Install failed with exit code $LASTEXITCODE" }
+
+          & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Verify -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -Json
+          if ($LASTEXITCODE -ne 0) { throw "Verify failed with exit code $LASTEXITCODE" }
+
+          $source = Get-Content -Raw -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'config\hermes-source.json') | ConvertFrom-Json
+          $marker = Get-Content -Raw -LiteralPath (Join-Path $installDir '.hermes-bootstrap-complete') | ConvertFrom-Json
+          if ([string]$marker.pinnedCommit -ne [string]$source.hermes.commitSha) { throw 'Bootstrap marker commit mismatch.' }
+          $git = Join-Path $hermesHome 'git\cmd\git.exe'
+          $head = (& $git -C $installDir rev-parse HEAD).Trim()
+          if ($head -ne [string]$source.hermes.commitSha) { throw 'Checkout HEAD mismatch.' }
+
+          "### Hermes Easy Setup E2E`n`n- Release: $($source.hermes.releaseTag)`n- Peeled commit: $head`n- Setup/credentials executed: no`n- Result: verified" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY

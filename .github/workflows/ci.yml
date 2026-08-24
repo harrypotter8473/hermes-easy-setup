@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Repository packaging allowlist
+        shell: powershell
+        run: .\tests\Test-RepositoryHygiene.ps1
+
+      - name: PowerShell syntax and encoding
+        shell: powershell
+        run: .\tests\Test-PowerShellSyntax.ps1
+
+      - name: Unit tests on Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\Run-Tests.ps1
+
+      - name: Security regression tests
+        shell: powershell
+        run: .\tests\Run-SecurityTests.ps1
+
+      - name: CLI contract tests
+        shell: powershell
+        run: .\tests\Run-CliTests.ps1
+
+      - name: WPF smoke test
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Run-GuiTests.ps1
+
+      - name: Unit tests on PowerShell 7
+        shell: pwsh
+        run: .\tests\Run-Tests.ps1
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
