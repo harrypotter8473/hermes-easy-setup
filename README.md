@@ -83,8 +83,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\HermesEasySetup.ps1 `
 - 공식 repository와 annotated tag 객체, peeled commit 연결
 - 해당 commit tree의 `scripts/install.ps1` Git blob, 크기, SHA-256
 - signed Microsoft System32 Windows PowerShell만 설치기 host로 사용
+- 모든 설치 단계 전에 Program Files의 서명된 Git for Windows를 필수로 확인하고, 모든 공식 stage의 PATH 선두에 고정하며 새 repository clone에는 일회성 Git global/attributes 설정으로 LF checkout을 선행 적용
 - stage protocol 및 manifest의 fail-closed 검증
 - 승인되지 않은 호스트, 캐시 변조와 예상 밖 단계 거부
+
+이 Git 설정은 새 `repository` 단계에서만 사용자 global 설정 대신 사용하며 사용자의 `~/.gitconfig`를 수정하지 않습니다. 따라서 user-global에만 둔 프록시, 사설 CA, credential helper는 이 공개 HTTPS clone에 적용되지 않습니다. system Git 설정과 표준 프록시 환경 변수는 유지됩니다.
+
+현재 안전 경계에서는 [공식 Git for Windows](https://gitforwindows.org/)가 Program Files에 미리 설치되어 있어야 합니다. 공식 Hermes 설치기의 해시 미고정 portable Git 다운로드 경로는 실행하지 않습니다.
 
 공식 설치 스크립트가 이후 받는 Python, Node, 시스템 패키지 등 모든 전이 산출물의 완전한 재현성까지 보장하지는 않습니다. 자세한 내용은 [SECURITY.md](SECURITY.md)를 참고하세요.
 

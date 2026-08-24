@@ -55,6 +55,8 @@ v1은 `InstallDir == HermesHome\hermes-agent`를 강제합니다. RuntimeRoot는
 
 각 자동 단계는 새 signed Windows PowerShell 프로세스에서 `-Stage`, `-Commit`, `-HermesHome`, `-InstallDir`, `-SkipSetup`, `-NonInteractive`, `-Json`으로 실행됩니다. stdout/stderr는 stream별 4 MiB로 제한하고 마지막 유효 JSON frame을 스키마 검증합니다.
 
+설치 시작 전에 Program Files의 유효하게 서명된 Git for Windows를 필수로 확인하고 모든 공식 stage의 PATH 선두에 둡니다. 이로써 상류 설치기의 PATH Git 실행과 해시 미고정 portable Git 다운로드를 피합니다. 새 checkout의 `repository` 단계에만 RuntimeRoot의 예측 불가능한 일회성 Git global/빈 attributes 파일을 `CreateNew`로 만들고 전달해 clone 최초 checkout부터 LF를 적용한 뒤 프로세스 종료 시 제거합니다. 사용자 global Git 파일은 읽거나 수정하지 않으며 기존 checkout에는 이 override를 적용하지 않아 상류의 local-change 보존/거부 동작을 유지합니다. 상류가 clone 직전 `GIT_CONFIG_COUNT`를 자체 사용하므로 command-scope 주입이 아니라 별도 global 파일을 사용합니다. `GIT_COMMON_DIR`를 포함한 config/repository/object redirect 환경은 제거합니다.
+
 일반 stage 제한은 30분, dependencies/node-deps/platform-sdks는 90분, Desktop은 180분입니다. timeout이면 정확한 System32 `taskkill.exe /T /F`로 해당 프로세스 트리를 정리합니다.
 
 `-Resume`은 schema, 실행 중/실패 상태, 계획 지문과 manifest가 모두 같은 경우만 허용됩니다. 이전 success 기록의 postcondition을 추측하지 않고 모든 자동 단계를 Pending으로 되돌려 공식 idempotent stage를 다시 적용합니다. `configure`와 `gateway`는 별도 대화형 설정으로 넘깁니다.
@@ -65,7 +67,7 @@ v1은 `InstallDir == HermesHome\hermes-agent`를 강제합니다. RuntimeRoot는
 
 - 대상 `InstallDir\bin\hermes.exe` 또는 `venv\Scripts\hermes.exe`가 실제 실행됨
 - `venv\Scripts\python.exe` 존재
-- `.git` checkout과 managed Git 존재
+- `.git` checkout과 서명된 Program Files Git 존재
 - origin이 정확한 공식 HTTPS/SSH 값
 - checkout이 clean이고 HEAD가 peeled pin과 정확히 일치
 - `.hermes-bootstrap-complete` schema 1과 pinnedCommit 일치

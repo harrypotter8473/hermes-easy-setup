@@ -219,7 +219,12 @@ function Invoke-HermesProcess {
     $info.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false)
     if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) { $info.WorkingDirectory = $WorkingDirectory }
     foreach ($key in $Environment.Keys) {
-        $info.EnvironmentVariables[[string]$key] = [string]$Environment[$key]
+        $environmentKey = [string]$key
+        if ($null -eq $Environment[$key]) {
+            [void]$info.EnvironmentVariables.Remove($environmentKey)
+        } else {
+            $info.EnvironmentVariables[$environmentKey] = [string]$Environment[$key]
+        }
     }
 
     $process = New-Object System.Diagnostics.Process

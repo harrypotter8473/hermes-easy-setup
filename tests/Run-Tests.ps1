@@ -54,8 +54,113 @@ try {
     Assert-Equal $planA.Fingerprint $planB.Fingerprint 'plan fingerprint deterministic'
     Assert-True ($planA.Fingerprint -ne $planC.Fingerprint) 'material option changes fingerprint'
 
+    $systemGitHome = Join-Path $testRootFull 'system-git-probe-home'
+    $signedSystemGit = Get-HermesVerificationGitPath -HermesHome $systemGitHome
+    Assert-True (-not [string]::IsNullOrWhiteSpace($signedSystemGit)) 'signed Program Files Git is available for verification tests'
+
+    $planManagedGit = Join-Path $planA.HermesHome 'git\cmd\git.exe'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $planManagedGit) -Force | Out-Null
+    Copy-Item -LiteralPath $signedSystemGit -Destination $planManagedGit
+    $installEngineModulePath = (Resolve-Path -LiteralPath (Join-Path $projectRoot 'src\HermesEasySetup.InstallEngine.psm1')).Path
+    $installEngineModule = Get-Module | Where-Object { [string]::Equals([string]$_.Path, $installEngineModulePath, [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+    Assert-True ($null -ne $installEngineModule) 'InstallEngine module context is available for private resolver tests'
+    $signedManagedCandidate = & $installEngineModule { param($path) Test-HermesGitCandidate -LiteralPath $path -RequireValidSignature } $planManagedGit
+    Assert-Equal ([System.IO.Path]::GetFullPath($planManagedGit)) $signedManagedCandidate 'signed Git candidate passes leaf validation'
+    New-Item -ItemType Directory -Path $planA.RuntimeRoot -Force | Out-Null
+
+    $callerGitConfig = Join-Path $testRootFull 'caller.gitconfig'
+    $callerGitConfigText = "[core]`n`tautocrlf = true`n"
+    [System.IO.File]::WriteAllText($callerGitConfig, $callerGitConfigText, (New-Object System.Text.UTF8Encoding($false)))
+    $previousGlobalConfig = [Environment]::GetEnvironmentVariable('GIT_CONFIG_GLOBAL', [EnvironmentVariableTarget]::Process)
+    try {
+        [Environment]::SetEnvironmentVariable('GIT_CONFIG_GLOBAL', $callerGitConfig, [EnvironmentVariableTarget]::Process)
+        $repositoryEnvironment = New-HermesStageEnvironment -Plan $planA -Stage 'repository'
+        $gitConfigPath = [string]$repositoryEnvironment['GIT_CONFIG_GLOBAL']
+        $token = [System.IO.Path]::GetFileName($gitConfigPath).Substring(11, 32)
+        $gitAttributesPath = Join-Path $planA.RuntimeRoot ("git-attributes-$token.txt")
+        $attributesConfigValue = ([System.IO.Path]::GetFullPath($gitAttributesPath)).Replace('\', '/').Replace('"', '\"')
+        $gitConfigText = "[core]`n`tautocrlf = false`n`tattributesFile = `"$attributesConfigValue`"`n"
+        Assert-Equal $planA.HermesHome $repositoryEnvironment['HERMES_HOME'] 'stage environment preserves HERMES_HOME'
+        Assert-True ($repositoryEnvironment.ContainsKey('GIT_CONFIG_GLOBAL')) 'fresh repository stage receives managed global Git config'
+        Assert-True ($gitConfigPath.StartsWith(([System.IO.Path]::GetFullPath($planA.RuntimeRoot).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) 'managed Git config stays inside RuntimeRoot'
+        Assert-True ((Split-Path -Leaf $gitConfigPath) -match '^git-global-[0-9a-f]{32}\.config$') 'managed Git config uses an unpredictable filename'
+        Assert-Equal $gitConfigText ([System.IO.File]::ReadAllText($gitConfigPath, [System.Text.Encoding]::UTF8)) 'managed Git config forces LF and empty global attributes'
+        Assert-Equal 0 (Get-Item -LiteralPath $gitAttributesPath).Length 'managed global attributes file is empty'
+        $coreRead = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('config', '--file', $gitConfigPath, '--bool', '--get', 'core.autocrlf') -Environment $repositoryEnvironment -TimeoutSeconds 30
+        Assert-Equal 0 $coreRead.ExitCode 'managed Git config is accepted by Git'
+        Assert-Equal 'false' $coreRead.StdOut.Trim() 'Git reads managed core.autocrlf as false'
+        $upstreamGlobalWrite = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('config', '--global', 'windows.appendAtomically', 'false') -Environment $repositoryEnvironment -TimeoutSeconds 30
+        Assert-Equal 0 $upstreamGlobalWrite.ExitCode 'upstream global Git write targets managed config'
+        $coreAfterWrite = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('config', '--file', $gitConfigPath, '--bool', '--get', 'core.autocrlf') -Environment $repositoryEnvironment -TimeoutSeconds 30
+        Assert-Equal 'false' $coreAfterWrite.StdOut.Trim() 'upstream global write preserves managed core.autocrlf'
+        $attributesAfterWrite = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('config', '--file', $gitConfigPath, '--path', '--get', 'core.attributesFile') -Environment $repositoryEnvironment -TimeoutSeconds 30
+        Assert-Equal ([System.IO.Path]::GetFullPath($gitAttributesPath)) ([System.IO.Path]::GetFullPath($attributesAfterWrite.StdOut.Trim())) 'upstream global write preserves managed attributes file'
+        $gitConfigBytes = [System.IO.File]::ReadAllBytes($gitConfigPath)
+        Assert-True (-not ($gitConfigBytes[0] -eq 0xEF -and $gitConfigBytes[1] -eq 0xBB -and $gitConfigBytes[2] -eq 0xBF)) 'managed Git config has no UTF-8 BOM'
+
+        $repositoryEnvironmentAgain = New-HermesStageEnvironment -Plan $planA -Stage 'repository'
+        $gitConfigPathAgain = [string]$repositoryEnvironmentAgain['GIT_CONFIG_GLOBAL']
+        Assert-True (-not $gitConfigPath.Equals($gitConfigPathAgain, [StringComparison]::OrdinalIgnoreCase)) 'managed Git config path is never reused'
+        Assert-Equal $callerGitConfigText ([System.IO.File]::ReadAllText($callerGitConfig, [System.Text.Encoding]::UTF8)) 'caller global Git config is unchanged'
+        Assert-True ($repositoryEnvironmentAgain.ContainsKey('GIT_CONFIG_PARAMETERS') -and $null -eq $repositoryEnvironmentAgain['GIT_CONFIG_PARAMETERS']) 'ambient Git command parameters are removed'
+        Assert-True ($repositoryEnvironmentAgain.ContainsKey('GIT_CONFIG_SYSTEM') -and $null -eq $repositoryEnvironmentAgain['GIT_CONFIG_SYSTEM']) 'ambient Git system redirect is removed'
+        Assert-True ($repositoryEnvironmentAgain.ContainsKey('GIT_EXEC_PATH') -and $null -eq $repositoryEnvironmentAgain['GIT_EXEC_PATH']) 'ambient Git executable redirect is removed'
+        Assert-True ($repositoryEnvironmentAgain.ContainsKey('GIT_COMMON_DIR') -and $null -eq $repositoryEnvironmentAgain['GIT_COMMON_DIR']) 'ambient Git common directory redirect is removed'
+        Assert-True ($repositoryEnvironmentAgain.ContainsKey('GIT_NAMESPACE') -and $null -eq $repositoryEnvironmentAgain['GIT_NAMESPACE']) 'ambient Git namespace redirect is removed'
+        Assert-Equal '0' $repositoryEnvironmentAgain['GIT_CONFIG_NOSYSTEM'] 'default Git system configuration remains enabled'
+        Assert-Equal '1' $repositoryEnvironmentAgain['GIT_ATTR_NOSYSTEM'] 'system Git attributes are disabled'
+
+        Remove-HermesStageEnvironmentArtifacts -Environment $repositoryEnvironment -Plan $planA
+        Remove-HermesStageEnvironmentArtifacts -Environment $repositoryEnvironmentAgain -Plan $planA
+        Assert-True (-not (Test-Path -LiteralPath $gitConfigPath)) 'first managed Git config is removed after stage'
+        Assert-True (-not (Test-Path -LiteralPath $gitConfigPathAgain)) 'second managed Git config is removed after stage'
+        Assert-True (-not (Test-Path -LiteralPath $gitAttributesPath)) 'managed Git attributes are removed after stage'
+    } finally {
+        [Environment]::SetEnvironmentVariable('GIT_CONFIG_GLOBAL', $previousGlobalConfig, [EnvironmentVariableTarget]::Process)
+    }
+
+    $existingRepositoryEnvironment = New-HermesStageEnvironment -Plan $planA -Stage 'repository' -ExistingCheckout
+    Assert-True ($existingRepositoryEnvironment.ContainsKey('GIT_CONFIG_GLOBAL') -and $null -eq $existingRepositoryEnvironment['GIT_CONFIG_GLOBAL']) 'existing checkout does not receive fresh clone config'
+    Assert-True ($existingRepositoryEnvironment.ContainsKey('GIT_COMMON_DIR') -and $null -eq $existingRepositoryEnvironment['GIT_COMMON_DIR']) 'existing checkout removes ambient common directory'
+    $trustedGitPathPrefix = [System.IO.Path]::GetDirectoryName($signedSystemGit) + [System.IO.Path]::PathSeparator
+    Assert-True ([string]$existingRepositoryEnvironment['PATH'] -like "$trustedGitPathPrefix*") 'repository stage PATH starts with Program Files Git'
+    $gitStageEnvironment = New-HermesStageEnvironment -Plan $planA -Stage 'git'
+    Assert-True ([string]$gitStageEnvironment['PATH'] -like "$trustedGitPathPrefix*") 'official Git stage PATH starts with Program Files Git'
+    Assert-True ($gitStageEnvironment.ContainsKey('GIT_CONFIG_GLOBAL') -and $null -eq $gitStageEnvironment['GIT_CONFIG_GLOBAL']) 'official Git stage removes ambient global config'
+    $uvEnvironment = New-HermesStageEnvironment -Plan $planA -Stage 'uv'
+    Assert-True ([string]$uvEnvironment['PATH'] -like "$trustedGitPathPrefix*") 'later automatic stage PATH starts with Program Files Git'
+    Assert-True ($uvEnvironment.ContainsKey('GIT_CONFIG_GLOBAL') -and $null -eq $uvEnvironment['GIT_CONFIG_GLOBAL']) 'later automatic stage removes ambient global config'
+    Assert-True ($uvEnvironment.ContainsKey('GIT_COMMON_DIR') -and $null -eq $uvEnvironment['GIT_COMMON_DIR']) 'later automatic stage removes ambient common directory'
+    Assert-Equal ([System.IO.Path]::GetFullPath($signedSystemGit)) (Get-HermesVerificationGitPath -HermesHome $planA.HermesHome) 'Program Files Git is selected'
+
+    $unsignedGitHome = Join-Path $testRootFull 'unsigned-git-home'
+    $unsignedGitFixture = Join-Path $unsignedGitHome 'git\cmd\git.exe'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $unsignedGitFixture) -Force | Out-Null
+    [System.IO.File]::WriteAllText($unsignedGitFixture, 'fixture', (New-Object System.Text.UTF8Encoding($false)))
+    $unsignedManagedCandidate = & $installEngineModule { param($path) Test-HermesGitCandidate -LiteralPath $path -RequireValidSignature } $unsignedGitFixture
+    Assert-True ([string]::IsNullOrWhiteSpace($unsignedManagedCandidate)) 'unsigned managed Git is rejected'
+
+    $competingGitHome = Join-Path $testRootFull 'competing-git-home'
+    $competingGitExe = Join-Path $competingGitHome 'git\cmd\git.exe'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $competingGitExe) -Force | Out-Null
+    Copy-Item -LiteralPath $signedSystemGit -Destination $competingGitExe
+    [System.IO.File]::WriteAllText((Join-Path (Split-Path -Parent $competingGitExe) 'git.cmd'), '@exit /b 0', (New-Object System.Text.ASCIIEncoding))
+    $competingManagedCandidate = & $installEngineModule { param($path) Test-HermesGitCandidate -LiteralPath $path -RequireValidSignature } $competingGitExe
+    Assert-True ([string]::IsNullOrWhiteSpace($competingManagedCandidate)) 'managed Git with competing git.cmd is rejected'
+
     Assert-Equal 'plain' (ConvertTo-WindowsProcessArgument -Argument 'plain') 'plain argv unchanged'
     Assert-Equal '"two words"' (ConvertTo-WindowsProcessArgument -Argument 'two words') 'space argv quoted'
+    $probeVariable = 'HERMES_EASY_SETUP_REMOVE_PROBE'
+    $previousProbe = [Environment]::GetEnvironmentVariable($probeVariable, [EnvironmentVariableTarget]::Process)
+    try {
+        [Environment]::SetEnvironmentVariable($probeVariable, 'ambient', [EnvironmentVariableTarget]::Process)
+        $probeCommand = "if (Test-Path Env:$probeVariable) { Write-Output present } else { Write-Output absent }"
+        $probeResult = Invoke-HermesProcess -FilePath (Get-HermesPowerShellExecutable) -ArgumentList @('-NoLogo', '-NoProfile', '-Command', $probeCommand) -Environment @{ $probeVariable = $null } -TimeoutSeconds 30
+        Assert-Equal 0 $probeResult.ExitCode 'child process environment removal succeeds'
+        Assert-Equal 'absent' $probeResult.StdOut.Trim() 'null environment entry is not inherited by child process'
+    } finally {
+        [Environment]::SetEnvironmentVariable($probeVariable, $previousProbe, [EnvironmentVariableTarget]::Process)
+    }
     $frameText = 'noise' + [Environment]::NewLine + '{"stage":"one","ok":true}' + [Environment]::NewLine + 'more'
     $frame = ConvertFrom-HermesJsonFrame -Text $frameText -RequiredProperty 'stage'
     Assert-Equal 'one' $frame.stage 'last valid JSON frame parsed'

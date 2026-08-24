@@ -29,6 +29,27 @@ jobs:
           $runtimeRoot = Join-Path $e2eRoot 'wizard-runtime'
           $cli = Join-Path $env:GITHUB_WORKSPACE 'HermesEasySetup.ps1'
 
+          New-Item -ItemType Directory -Path $e2eRoot -Force | Out-Null
+          $callerGitConfig = Join-Path $e2eRoot 'caller-gitconfig'
+          $callerGitAttributes = Join-Path $e2eRoot 'caller-attributes'
+          $callerGitAttributesText = "*.mdx text eol=crlf`n"
+          [System.IO.File]::WriteAllText($callerGitAttributes, $callerGitAttributesText, (New-Object System.Text.UTF8Encoding($false)))
+          $callerAttributesValue = ([System.IO.Path]::GetFullPath($callerGitAttributes)).Replace('\', '/').Replace('"', '\"')
+          $callerGitConfigText = "[core]`n`tautocrlf = true`n`tattributesFile = `"$callerAttributesValue`"`n"
+          [System.IO.File]::WriteAllText($callerGitConfig, $callerGitConfigText, (New-Object System.Text.UTF8Encoding($false)))
+          $env:GIT_CONFIG_GLOBAL = $callerGitConfig
+
+          $hostileGitBin = Join-Path $e2eRoot 'hostile-bin'
+          $fakeGitMarker = Join-Path $e2eRoot 'fake-git-executed'
+          New-Item -ItemType Directory -Path $hostileGitBin -Force | Out-Null
+          $fakeGitText = "@echo off`r`n>`"$fakeGitMarker`" echo hostile-git-executed`r`nexit /b 97`r`n"
+          [System.IO.File]::WriteAllText((Join-Path $hostileGitBin 'git.cmd'), $fakeGitText, (New-Object System.Text.ASCIIEncoding))
+          $env:PATH = $hostileGitBin + [System.IO.Path]::PathSeparator + $env:PATH
+          $hostileCommonDir = Join-Path $e2eRoot 'hostile-common-dir'
+          New-Item -ItemType Directory -Path $hostileCommonDir -Force | Out-Null
+          $env:GIT_COMMON_DIR = $hostileCommonDir
+          $env:GIT_NAMESPACE = 'hermes-e2e-hostile'
+
           $planText = & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Plan -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -SetupMode Later -Json
           if ($LASTEXITCODE -ne 0) { throw "Plan failed with exit code $LASTEXITCODE" }
           $plan = $planText | ConvertFrom-Json
@@ -36,14 +57,45 @@ jobs:
           & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -SetupMode Later -ExpectedPlanFingerprint $plan.Fingerprint -JsonEvents
           if ($LASTEXITCODE -ne 0) { throw "Install failed with exit code $LASTEXITCODE" }
 
-          & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Verify -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -Json
+          $verifyText = & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Verify -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -Json
           if ($LASTEXITCODE -ne 0) { throw "Verify failed with exit code $LASTEXITCODE" }
+          $verify = $verifyText | ConvertFrom-Json
+          if (-not [bool]$verify.Verified -or -not [bool]$verify.CheckoutClean -or -not [bool]$verify.OriginOfficial) { throw 'Product provenance verification did not pass.' }
+          Remove-Item Env:GIT_CONFIG_GLOBAL
+          Remove-Item Env:GIT_COMMON_DIR
+          Remove-Item Env:GIT_NAMESPACE
 
           $source = Get-Content -Raw -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'config\hermes-source.json') | ConvertFrom-Json
           $marker = Get-Content -Raw -LiteralPath (Join-Path $installDir '.hermes-bootstrap-complete') | ConvertFrom-Json
           if ([string]$marker.pinnedCommit -ne [string]$source.hermes.commitSha) { throw 'Bootstrap marker commit mismatch.' }
-          $git = Join-Path $hermesHome 'git\cmd\git.exe'
-          $head = (& $git -C $installDir rev-parse HEAD).Trim()
+          Import-Module (Join-Path $env:GITHUB_WORKSPACE 'src\HermesEasySetup.Loader.psm1') -Force
+          $git = Get-HermesVerificationGitPath -HermesHome $hermesHome
+          if ([string]::IsNullOrWhiteSpace($git)) { throw 'No trusted Git executable is available for provenance checks.' }
+          if ([string]$verify.GitPath -ne [string]$git) { throw 'Verify used an unexpected Git executable.' }
+
+          $headText = @(& $git -C $installDir rev-parse HEAD)
+          if ($LASTEXITCODE -ne 0) { throw "git rev-parse failed with exit code $LASTEXITCODE" }
+          $head = ($headText -join "`n").Trim()
           if ($head -ne [string]$source.hermes.commitSha) { throw 'Checkout HEAD mismatch.' }
 
-          "### Hermes Easy Setup E2E`n`n- Release: $($source.hermes.releaseTag)`n- Peeled commit: $head`n- Setup/credentials executed: no`n- Result: verified" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          $autocrlfText = @(& $git -C $installDir config --bool --get core.autocrlf)
+          if ($LASTEXITCODE -ne 0) { throw "git config failed with exit code $LASTEXITCODE" }
+          $autocrlf = ($autocrlfText -join "`n").Trim()
+          if ($autocrlf -ne 'false') { throw "Checkout core.autocrlf is '$autocrlf', expected false." }
+
+          $statusText = @(& $git -C $installDir status --porcelain --untracked-files=normal)
+          if ($LASTEXITCODE -ne 0) { throw "git status failed with exit code $LASTEXITCODE" }
+          if (-not [string]::IsNullOrWhiteSpace(($statusText -join "`n"))) { throw 'Checkout is not clean.' }
+
+          $eolText = @(& $git -C $installDir ls-files --eol -- website/docs/index.mdx)
+          if ($LASTEXITCODE -ne 0) { throw "git ls-files --eol failed with exit code $LASTEXITCODE" }
+          $eol = ($eolText -join "`n").Trim()
+          if ($eol -notmatch '^i/lf\s+w/lf\s+') { throw "Pinned MDX checkout is not LF/LF: $eol" }
+
+          if ([System.IO.File]::ReadAllText($callerGitConfig, [System.Text.Encoding]::UTF8) -cne $callerGitConfigText) { throw 'Caller global Git config was modified.' }
+          if ([System.IO.File]::ReadAllText($callerGitAttributes, [System.Text.Encoding]::UTF8) -cne $callerGitAttributesText) { throw 'Caller global Git attributes were modified.' }
+          if (Test-Path -LiteralPath $fakeGitMarker) { throw 'Hostile PATH Git was executed.' }
+          $staleGitFiles = @(Get-ChildItem -LiteralPath $runtimeRoot -File -Force | Where-Object { $_.Name -match '^git-(?:global-[0-9a-f]{32}\.config|attributes-[0-9a-f]{32}\.txt)$' })
+          if ($staleGitFiles.Count -ne 0) { throw 'Ephemeral managed Git files were not removed.' }
+
+          "### Hermes Easy Setup E2E`n`n- Release: $($source.hermes.releaseTag)`n- Peeled commit: $head`n- Hostile PATH/config/common-dir: overridden`n- Checkout EOL: LF/LF`n- Checkout clean: yes`n- Setup/credentials executed: no`n- Result: verified" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY

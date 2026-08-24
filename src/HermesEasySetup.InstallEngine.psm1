@@ -17,6 +17,128 @@ function Get-HermesStageArguments {
     return $arguments
 }
 
+function Write-HermesExclusiveFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes
+    )
+
+    $stream = New-Object System.IO.FileStream($LiteralPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try {
+        if ($Bytes.Length -gt 0) { $stream.Write($Bytes, 0, $Bytes.Length) }
+        $stream.Flush()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Remove-HermesManagedGitFiles {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ConfigPath,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot
+    )
+
+    try {
+        $runtimeFull = [System.IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\', '/')
+        $configFull = [System.IO.Path]::GetFullPath($ConfigPath)
+        $runtimePrefix = $runtimeFull + [System.IO.Path]::DirectorySeparatorChar
+        $leaf = Split-Path -Leaf $configFull
+        if (-not $configFull.StartsWith($runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals((Split-Path -Parent $configFull).TrimEnd('\', '/'), $runtimeFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $leaf -notmatch '^git-global-(?<Token>[0-9a-f]{32})\.config$') { return }
+
+        $token = [string]$Matches['Token']
+        foreach ($path in @($configFull, (Join-Path $runtimeFull ("git-attributes-$token.txt")))) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+            $item = Get-Item -LiteralPath $path -Force
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            Remove-Item -LiteralPath $path -Force
+        }
+    } catch {
+        # Best effort: these files contain no secret, and unsafe replacements are never followed.
+    }
+}
+
+function Remove-HermesStageEnvironmentArtifacts {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Environment,
+        [Parameter(Mandatory = $true)]$Plan
+    )
+
+    if (-not $Environment.ContainsKey('GIT_CONFIG_GLOBAL') -or [string]::IsNullOrWhiteSpace([string]$Environment['GIT_CONFIG_GLOBAL'])) { return }
+    Remove-HermesManagedGitFiles -ConfigPath ([string]$Environment['GIT_CONFIG_GLOBAL']) -RuntimeRoot ([string]$Plan.RuntimeRoot)
+}
+
+function New-HermesStageEnvironment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [switch]$ExistingCheckout
+    )
+
+    $environment = @{ HERMES_HOME = [string]$Plan.HermesHome }
+    $git = Get-HermesVerificationGitPath -HermesHome ([string]$Plan.HermesHome)
+    if ([string]::IsNullOrWhiteSpace($git)) {
+        Throw-HermesEasySetupError -Message '공식 설치 단계를 실행할 신뢰 가능한 Git을 찾지 못했습니다.' -ExitCode 10 -Category 'Preflight'
+    }
+    $gitDirectory = Split-Path -Parent $git
+    $currentPath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Process)
+    $environment['PATH'] = $(if ([string]::IsNullOrWhiteSpace($currentPath)) { $gitDirectory } else { $gitDirectory + [System.IO.Path]::PathSeparator + $currentPath })
+
+    # Remove ambient command-scope, executable, attribute, repository, object, and transport redirection values.
+    foreach ($key in @(
+        'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
+        'GIT_CONFIG_SYSTEM', 'GIT_EXEC_PATH', 'GIT_TEMPLATE_DIR', 'GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE',
+        'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+        'GIT_NAMESPACE', 'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_PROXY_COMMAND', 'GIT_SSL_NO_VERIFY'
+    )) {
+        $environment[$key] = $null
+    }
+    $environment['GIT_CONFIG_NOSYSTEM'] = '0'
+    $environment['GIT_ATTR_NOSYSTEM'] = '1'
+
+    if ($Stage -ne 'repository' -or $ExistingCheckout) { return $environment }
+
+    $runtimeRoot = [System.IO.Path]::GetFullPath([string]$Plan.RuntimeRoot)
+    $token = [guid]::NewGuid().ToString('N')
+    $configPath = [System.IO.Path]::GetFullPath((Join-Path $runtimeRoot ("git-global-$token.config")))
+    $attributesPath = [System.IO.Path]::GetFullPath((Join-Path $runtimeRoot ("git-attributes-$token.txt")))
+    $runtimePrefix = $runtimeRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    foreach ($path in @($configPath, $attributesPath)) {
+        if (-not $path.StartsWith($runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals((Split-Path -Parent $path).TrimEnd('\', '/'), $runtimeRoot.TrimEnd('\', '/'), [System.StringComparison]::OrdinalIgnoreCase)) {
+            Throw-HermesEasySetupError -Message '관리형 Git 설정 경로가 RuntimeRoot 밖을 가리킵니다.' -ExitCode 10 -Category 'PathSafety'
+        }
+    }
+
+    $attributesConfigValue = $attributesPath.Replace('\', '/').Replace('"', '\"')
+    $configText = "[core]`n`tautocrlf = false`n`tattributesFile = `"$attributesConfigValue`"`n"
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    try {
+        Write-HermesExclusiveFile -LiteralPath $attributesPath -Bytes ([byte[]]@())
+        Write-HermesExclusiveFile -LiteralPath $configPath -Bytes $utf8.GetBytes($configText)
+        $configItem = Get-Item -LiteralPath $configPath -Force
+        $attributesItem = Get-Item -LiteralPath $attributesPath -Force
+        if ([bool]$configItem.PSIsContainer -or [bool]$attributesItem.PSIsContainer -or
+            ($configItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            ($attributesItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $attributesItem.Length -ne 0 -or
+            [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8) -cne $configText) {
+            throw 'managed Git file verification failed'
+        }
+    } catch {
+        Remove-HermesManagedGitFiles -ConfigPath $configPath -RuntimeRoot $runtimeRoot
+        Throw-HermesEasySetupError -Message '관리형 Git 설정 파일을 안전하게 만들지 못했습니다.' -ExitCode 10 -Category 'PathSafety'
+    }
+
+    $environment['GIT_CONFIG_GLOBAL'] = $configPath
+    return $environment
+}
+
 function Get-HermesStageTimeoutSeconds {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$Stage)
@@ -46,15 +168,60 @@ function Test-HermesStageFrame {
     return [pscustomobject]@{ Valid = $true; Reason = $null }
 }
 
-function Get-HermesManagedGitPath {
+function Test-HermesGitCandidate {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$HermesHome)
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [switch]$RequireValidSignature
+    )
 
-    foreach ($candidate in @((Join-Path $HermesHome 'git\cmd\git.exe'), (Join-Path $HermesHome 'git\bin\git.exe'))) {
-        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
-        $item = Get-Item -LiteralPath $candidate -Force
-        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) { return $item.FullName }
+    try {
+        if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) { return $null }
+        $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
+        $safety = Test-HermesSafeTargetPath -LiteralPath $fullPath -Label 'Git 검증 실행 파일'
+        if (-not $safety.Safe) { return $null }
+        $item = Get-Item -LiteralPath $fullPath -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $null }
+        if ($RequireValidSignature) {
+            $directory = Split-Path -Parent $fullPath
+            foreach ($extension in @('.com', '.cmd', '.bat')) {
+                if (Test-Path -LiteralPath (Join-Path $directory ('git' + $extension)) -PathType Leaf) { return $null }
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $fullPath -ErrorAction Stop
+            if ([string]$signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { return $null }
+            $simpleName = $signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+            $subject = [string]$signature.SignerCertificate.Subject
+            if ($simpleName -cne 'Johannes Schindelin' -or $subject -notmatch '(?i)(?:^|,\s*)O=Johannes Schindelin(?:\s*,|$)') { return $null }
+        }
+        return $fullPath
+    } catch {
+        return $null
     }
+}
+
+function Get-HermesVerificationGitPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$HermesHome
+    )
+
+    $seen = @{}
+    $programFolders = @(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+    )
+    foreach ($folder in $programFolders) {
+        if ([string]::IsNullOrWhiteSpace($folder)) { continue }
+        foreach ($relativePath in @('Git\cmd\git.exe', 'Git\bin\git.exe')) {
+            $candidate = Join-Path $folder $relativePath
+            $key = [System.IO.Path]::GetFullPath($candidate).ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $trusted = Test-HermesGitCandidate -LiteralPath $candidate -RequireValidSignature
+            if ($trusted) { return $trusted }
+        }
+    }
+
     return $null
 }
 
@@ -109,14 +276,20 @@ function Test-HermesInstallation {
     $head = $null
     $origin = $null
     $clean = $false
-    $git = Get-HermesManagedGitPath -HermesHome $paths.HermesHome
+    $git = Get-HermesVerificationGitPath -HermesHome $paths.HermesHome
     if ($checkoutPresent -and $git) {
-        $headResult = Invoke-HermesProcess -FilePath $git -ArgumentList @('-C', $paths.InstallDir, 'rev-parse', 'HEAD') -TimeoutSeconds 30
-        if ($headResult.ExitCode -eq 0 -and $headResult.StdOut.Trim() -match '^[0-9a-fA-F]{40}$') { $head = $headResult.StdOut.Trim() }
-        $originResult = Invoke-HermesProcess -FilePath $git -ArgumentList @('-C', $paths.InstallDir, 'remote', 'get-url', 'origin') -TimeoutSeconds 30
-        if ($originResult.ExitCode -eq 0) { $origin = $originResult.StdOut.Trim() }
-        $statusResult = Invoke-HermesProcess -FilePath $git -ArgumentList @('-C', $paths.InstallDir, 'status', '--porcelain', '--untracked-files=normal') -TimeoutSeconds 60
-        $clean = ($statusResult.ExitCode -eq 0 -and [string]::IsNullOrWhiteSpace($statusResult.StdOut))
+        $verificationPlan = [pscustomobject]@{ HermesHome = $paths.HermesHome; RuntimeRoot = $paths.RuntimeRoot }
+        $gitEnvironment = New-HermesStageEnvironment -Plan $verificationPlan -Stage 'repository'
+        try {
+            $headResult = Invoke-HermesProcess -FilePath $git -ArgumentList @('-C', $paths.InstallDir, 'rev-parse', 'HEAD') -Environment $gitEnvironment -TimeoutSeconds 30
+            if ($headResult.ExitCode -eq 0 -and $headResult.StdOut.Trim() -match '^[0-9a-fA-F]{40}$') { $head = $headResult.StdOut.Trim() }
+            $originResult = Invoke-HermesProcess -FilePath $git -ArgumentList @('-C', $paths.InstallDir, 'remote', 'get-url', 'origin') -Environment $gitEnvironment -TimeoutSeconds 30
+            if ($originResult.ExitCode -eq 0) { $origin = $originResult.StdOut.Trim() }
+            $statusResult = Invoke-HermesProcess -FilePath $git -ArgumentList @('-C', $paths.InstallDir, 'status', '--porcelain', '--untracked-files=normal') -Environment $gitEnvironment -TimeoutSeconds 60
+            $clean = ($statusResult.ExitCode -eq 0 -and [string]::IsNullOrWhiteSpace($statusResult.StdOut))
+        } finally {
+            Remove-HermesStageEnvironmentArtifacts -Environment $gitEnvironment -Plan $verificationPlan
+        }
     }
     $officialOrigins = @('https://github.com/NousResearch/hermes-agent.git', 'git@github.com:NousResearch/hermes-agent.git')
     $originOfficial = ($officialOrigins -contains $origin)
@@ -146,6 +319,7 @@ function Test-HermesInstallation {
         CheckoutHead = $head
         CheckoutHeadMatches = $headMatches
         CheckoutClean = $clean
+        GitPath = $git
         Origin = $origin
         OriginOfficial = $originOfficial
         VenvPythonPresent = $venvPresent
@@ -187,6 +361,10 @@ function Invoke-HermesInstall {
         $details = @($preflight.BlockingChecks | ForEach-Object { "$($_.Name): $($_.Detail)" }) -join '; '
         Throw-HermesEasySetupError -Message "사전 점검을 통과하지 못했습니다: $details" -ExitCode 10 -Category 'Preflight'
     }
+    $trustedGit = Get-HermesVerificationGitPath -HermesHome $paths.HermesHome
+    if ([string]::IsNullOrWhiteSpace($trustedGit)) {
+        Throw-HermesEasySetupError -Message 'Program Files에 유효하게 서명된 Git for Windows가 필요합니다. 공식 Git for Windows를 먼저 설치한 뒤 다시 실행하세요.' -ExitCode 10 -Category 'Preflight'
+    }
 
     foreach ($directory in @($paths.RuntimeRoot, $paths.LogDir, $paths.StateDir)) {
         if (-not (Test-Path -LiteralPath $directory -PathType Container)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
@@ -220,7 +398,6 @@ function Invoke-HermesInstall {
 
         $powershell = Get-HermesPowerShellExecutable
         $commonArgs = @(Get-HermesStageArguments -Plan $freshPlan -SourceConfig $sourceConfig)
-        $environment = @{ HERMES_HOME = $paths.HermesHome }
         $stageList = @($manifest.stages)
         for ($index = 0; $index -lt $stageList.Count; $index++) {
             $stage = $stageList[$index]
@@ -242,7 +419,12 @@ function Invoke-HermesInstall {
 
             $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installer.Path, '-Stage', $name) + $commonArgs
             $timeout = Get-HermesStageTimeoutSeconds -Stage $name
-            $result = Invoke-HermesProcess -FilePath $powershell -ArgumentList $arguments -Environment $environment -TimeoutSeconds $timeout
+            $stageEnvironment = New-HermesStageEnvironment -Plan $freshPlan -Stage $name -ExistingCheckout:$preflight.ExistingCheckout
+            try {
+                $result = Invoke-HermesProcess -FilePath $powershell -ArgumentList $arguments -Environment $stageEnvironment -TimeoutSeconds $timeout
+            } finally {
+                Remove-HermesStageEnvironmentArtifacts -Environment $stageEnvironment -Plan $freshPlan
+            }
             Write-HermesCapturedOutput -ProcessResult $result -LogPath $logPath -Stage $name -Callback $ProgressCallback
             $frame = ConvertFrom-HermesJsonFrame -Text $result.StdOut -RequiredProperty 'stage'
             $frameValidation = Test-HermesStageFrame -Frame $frame -ExpectedStage $name
@@ -323,7 +505,9 @@ function Start-HermesOfficialSetup {
 }
 
 Export-ModuleMember -Function @(
-    'Get-HermesStageArguments', 'Get-HermesStageTimeoutSeconds', 'Test-HermesStageFrame',
+    'Get-HermesStageArguments', 'New-HermesStageEnvironment', 'Remove-HermesStageEnvironmentArtifacts',
+    'Get-HermesStageTimeoutSeconds', 'Test-HermesStageFrame',
+    'Get-HermesVerificationGitPath',
     'Read-HermesBootstrapMarker', 'Test-HermesInstallation', 'Invoke-HermesInstall',
     'Start-HermesOfficialSetup'
 )

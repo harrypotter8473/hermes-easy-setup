@@ -23,6 +23,7 @@
 - 해당 commit tree의 `scripts/install.ps1` Git blob, 크기와 SHA-256
 - 검토된 stage protocol v1 manifest
 - 유효한 Microsoft Authenticode 서명의 정확한 System32 Windows PowerShell
+- 유효한 Johannes Schindelin Authenticode 서명의 Program Files Git for Windows
 
 ## 신뢰하지 않고 검증하는 것
 
@@ -32,8 +33,11 @@
 - 공식 설치기의 protocol/manifest 및 stage JSON 출력
 - PATH의 `hermes`나 `powershell.exe`
 - 사용자가 지정한 mutable 경로
+- 새 clone의 사용자 global Git 줄바꿈 설정과 command parameter 주입
 
 검증 실패 시 설치는 계속 진행하지 않습니다. 사용자 승인 계획 지문은 첫 변경 직전에 다시 확인하고, 설치기는 protocol/manifest와 매 stage 실행 직전에 재해시합니다.
+
+새 설치의 `repository` 단계는 RuntimeRoot 아래 예측 불가능한 이름의 UTF-8 no-BOM Git global/빈 attributes 파일을 `CreateNew`로 만들고 `core.autocrlf=false`를 clone 전에 적용합니다. repository 프로세스 종료 뒤 두 일회성 파일을 제거합니다. 사용자 global 파일 자체는 수정하지 않으며 이 단계에서는 읽지 않습니다. Program Files의 유효하게 서명된 Git for Windows를 설치 시작 전에 요구하고 모든 공식 stage의 PATH 선두에 고정합니다. 따라서 공식 설치기의 PATH Git 실행 및 해시 미고정 portable Git 다운로드 경로는 사용하지 않습니다. `GIT_COMMON_DIR`를 포함한 repository/object/config redirect 환경도 제거합니다. 이 경계는 fresh-clone 줄바꿈 결정성과 user-global 주입 축소를 위한 것이지 Git 전체 격리는 아닙니다. system 설정과 네트워크 환경은 유지되고, 기존 checkout의 local 설정은 더 높은 우선순위를 가지며 dirty 상태는 예외 없이 실패합니다.
 
 ## 보장 범위 밖
 
@@ -43,6 +47,8 @@
 - 코드 서명되지 않은 이 마법사 소스의 publisher identity
 - regex/best-effort 정제가 모든 종류의 새 비밀 형식을 제거한다는 보장
 - 사용자가 공식 설정 화면에 직접 입력한 공급자 자격증명의 관리
+- repository clone 중 user-global에만 정의된 기업 프록시, 사설 CA 또는 credential helper
+- Program Files에 공식 Git for Windows가 없는 환경의 자동 Git 부트스트랩
 
 이 프로젝트는 검토된 공식 설치기를 감싸는 안전 장치이지 독립적인 Hermes 배포판이 아닙니다.
 
