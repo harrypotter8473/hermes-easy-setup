@@ -41,8 +41,9 @@ try {
     $badCommit.hermes.commitSha = 'main'
     Assert-True (-not (Test-HermesSourceConfig -Config $badCommit).Valid) 'non-immutable commit rejected'
 
-    $redacted = Protect-HermesLogText 'Authorization: Bearer abc.def API_KEY=supersecret sk-abcdefghijklmnop'
-    Assert-True ($redacted -notmatch 'abc\.def|supersecret|sk-abcdefghijklmnop') 'log secrets redacted'
+    $redacted = Protect-HermesLogText 'Authorization: Bearer abc.def API_KEY=supersecret sk-abcdefghijklmnop https://url-user:url-secret@example.com/path'
+    Assert-True ($redacted -notmatch 'abc\.def|supersecret|sk-abcdefghijklmnop|url-secret') 'log secrets redacted'
+    Assert-True ($redacted -match 'https://\[REDACTED\]@example\.com/path') 'URL userinfo redacted'
     Assert-True ($redacted -match '\[REDACTED') 'redaction marker retained'
 
     Assert-True (-not (Test-HermesSafeTargetPath -LiteralPath 'C:\' -Label 'test').Safe) 'drive root target rejected'

@@ -224,7 +224,7 @@ function Get-HermesPreflight {
                             } else {
                                 $installDirectorySafe = $false
                                 $installDirectoryDetail = '기존 InstallDir의 Git origin이 공식 NousResearch/hermes-agent 저장소가 아닙니다.'
-                                $gitOriginDetail = $(if ([string]::IsNullOrWhiteSpace($originUrl)) { 'origin을 하나로 확인할 수 없습니다.' } else { "허용되지 않은 origin: $originUrl" })
+                                $gitOriginDetail = $(if ([string]::IsNullOrWhiteSpace($originUrl)) { 'origin을 하나로 확인할 수 없습니다.' } else { '허용되지 않은 origin입니다. 원문은 노출하지 않습니다.' })
                             }
                         }
                     }
@@ -285,7 +285,7 @@ function Get-HermesPreflight {
         OsVersion        = $osVersion.ToString()
         ExistingCommand  = $existingCommand
         ExistingCheckout = [bool]$existingCheckout
-        ExistingOrigin   = $originUrl
+        ExistingOrigin   = $(if ($gitOriginSafe -and -not [string]::IsNullOrWhiteSpace($originUrl)) { $originUrl } elseif ([string]::IsNullOrWhiteSpace($originUrl)) { $null } else { '[NON-OFFICIAL-REDACTED]' })
         Paths            = $paths
         Checks           = $checkArray
         BlockingChecks   = $blocking.ToArray()

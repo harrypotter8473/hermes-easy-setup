@@ -101,6 +101,7 @@ function Protect-HermesLogText {
 
     if ($null -eq $Text) { return $null }
     $protected = $Text
+    $protected = [regex]::Replace($protected, '(?i)\b(https?://)[^/\s:@]+(?::[^@/\s]*)?@', '$1[REDACTED]@')
     $protected = [regex]::Replace($protected, '(?is)-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----', '[REDACTED-PRIVATE-KEY]')
     $protected = [regex]::Replace($protected, '(?i)(Authorization\s*:\s*Bearer\s+)[A-Za-z0-9._~+\-/=]+', '$1[REDACTED]')
     $protected = [regex]::Replace($protected, '(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|secret)\s*[=:]\s*)[^\s,;]+', '$1[REDACTED]')

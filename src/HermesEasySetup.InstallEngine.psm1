@@ -276,6 +276,9 @@ function Test-HermesInstallation {
     $head = $null
     $origin = $null
     $clean = $false
+    $checkoutStatus = $null
+    $checkoutStatusTruncated = $false
+    $gitStatusExitCode = $null
     $git = Get-HermesVerificationGitPath -HermesHome $paths.HermesHome
     if ($checkoutPresent -and $git) {
         $verificationPlan = [pscustomobject]@{ HermesHome = $paths.HermesHome; RuntimeRoot = $paths.RuntimeRoot }
@@ -285,18 +288,40 @@ function Test-HermesInstallation {
             if ($headResult.ExitCode -eq 0 -and $headResult.StdOut.Trim() -match '^[0-9a-fA-F]{40}$') { $head = $headResult.StdOut.Trim() }
             $originResult = Invoke-HermesProcess -FilePath $git -ArgumentList @('-C', $paths.InstallDir, 'remote', 'get-url', 'origin') -Environment $gitEnvironment -TimeoutSeconds 30
             if ($originResult.ExitCode -eq 0) { $origin = $originResult.StdOut.Trim() }
-            $statusResult = Invoke-HermesProcess -FilePath $git -ArgumentList @('-C', $paths.InstallDir, 'status', '--porcelain', '--untracked-files=normal') -Environment $gitEnvironment -TimeoutSeconds 60
-            $clean = ($statusResult.ExitCode -eq 0 -and [string]::IsNullOrWhiteSpace($statusResult.StdOut))
+            $statusResult = Invoke-HermesProcess -FilePath $git -ArgumentList @('-C', $paths.InstallDir, 'status', '--porcelain=v1', '--untracked-files=normal') -Environment $gitEnvironment -TimeoutSeconds 60
+            $gitStatusExitCode = [int]$statusResult.ExitCode
+            $statusCandidates = @($statusResult.StdOut -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 21)
+            $statusLines = @($statusCandidates | Select-Object -First 20)
+            $checkoutStatusTruncated = ($statusCandidates.Count -gt 20)
+            $checkoutStatus = Protect-HermesLogText (($statusLines -join '; ').Trim())
+            if ($checkoutStatus.Length -gt 4096) {
+                $checkoutStatus = $checkoutStatus.Substring(0, 4096)
+                $checkoutStatusTruncated = $true
+            }
+            if ($statusResult.ExitCode -ne 0 -and [string]::IsNullOrWhiteSpace($checkoutStatus)) { $checkoutStatus = "git status exit $($statusResult.ExitCode)" }
+            $clean = ($statusResult.ExitCode -eq 0 -and $statusLines.Count -eq 0)
         } finally {
             Remove-HermesStageEnvironmentArtifacts -Environment $gitEnvironment -Plan $verificationPlan
         }
     }
     $officialOrigins = @('https://github.com/NousResearch/hermes-agent.git', 'git@github.com:NousResearch/hermes-agent.git')
     $originOfficial = ($officialOrigins -contains $origin)
+    $originOutput = $(if ($originOfficial) { $origin } elseif ([string]::IsNullOrWhiteSpace($origin)) { $null } else { '[NON-OFFICIAL-REDACTED]' })
     $headMatches = (-not [string]::IsNullOrWhiteSpace($head) -and $head.Equals($ExpectedCommit, [StringComparison]::OrdinalIgnoreCase))
     $markerMatches = ($marker.Valid -and $marker.PinnedCommit.Equals($ExpectedCommit, [StringComparison]::OrdinalIgnoreCase))
     $venvPresent = Test-Path -LiteralPath $venvPython -PathType Leaf
-    $verified = ($commandWorks -and $venvPresent -and $checkoutPresent -and $headMatches -and $originOfficial -and $clean -and $markerMatches)
+    $verificationChecks = [ordered]@{
+        CommandWorks = $commandWorks
+        VenvPythonPresent = $venvPresent
+        CheckoutPresent = $checkoutPresent
+        TrustedGitAvailable = (-not [string]::IsNullOrWhiteSpace($git))
+        CheckoutHeadMatches = $headMatches
+        OriginOfficial = $originOfficial
+        CheckoutClean = $clean
+        MarkerMatches = $markerMatches
+    }
+    $failedChecks = @($verificationChecks.Keys | Where-Object { -not [bool]$verificationChecks[$_] })
+    $verified = ($failedChecks.Count -eq 0)
 
     $doctorResult = $null
     if ($commandWorks) {
@@ -316,16 +341,22 @@ function Test-HermesInstallation {
         DoctorExitCode = $(if ($null -eq $doctorResult) { $null } else { $doctorResult.ExitCode })
         DoctorSummary = $(if ($null -eq $doctorResult) { 'doctor를 실행하지 않았습니다.' } elseif ($doctorHealthy) { 'hermes doctor 통과' } else { '공급자 설정 전에는 doctor 경고가 정상일 수 있습니다.' })
         ExpectedCommit = $ExpectedCommit
+        CheckoutPresent = $checkoutPresent
         CheckoutHead = $head
         CheckoutHeadMatches = $headMatches
         CheckoutClean = $clean
+        CheckoutStatus = $checkoutStatus
+        CheckoutStatusTruncated = $checkoutStatusTruncated
+        GitStatusExitCode = $gitStatusExitCode
         GitPath = $git
-        Origin = $origin
+        TrustedGitAvailable = (-not [string]::IsNullOrWhiteSpace($git))
+        Origin = $originOutput
         OriginOfficial = $originOfficial
         VenvPythonPresent = $venvPresent
         BootstrapMarker = $marker.Valid
         MarkerPinnedCommit = $marker.PinnedCommit
         MarkerMatches = $markerMatches
+        FailedChecks = @($failedChecks)
         LogPath = $LogPath
     }
 }
@@ -452,11 +483,14 @@ function Invoke-HermesInstall {
             checkout_head = [string]$verification.CheckoutHead
             origin = [string]$verification.Origin
             marker_commit = [string]$verification.MarkerPinnedCommit
+            failed_checks = @($verification.FailedChecks)
+            checkout_status = [string]$verification.CheckoutStatus
         }
         if (-not $verification.Verified) {
             $state.status = 'Failed'
             [void](Save-HermesInstallState -LiteralPath $paths.StateFile -State $state)
-            Throw-HermesEasySetupError -Message '공식 단계는 끝났지만 대상 launcher/venv/origin/고정 commit/bootstrap marker 검증에 실패했습니다.' -ExitCode 50 -Category 'Verification'
+            $failedCheckText = @($verification.FailedChecks) -join ', '
+            Throw-HermesEasySetupError -Message "공식 단계는 끝났지만 최종 검증에 실패했습니다: $failedCheckText" -ExitCode 50 -Category 'Verification'
         }
 
         $state.status = 'Completed'

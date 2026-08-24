@@ -80,6 +80,31 @@ try {
     $official = Get-HermesPreflight -HermesHome $officialHome -RuntimeRoot (Join-Path $testRoot 'official-runtime')
     Assert-SecurityTrue ((Get-Check $official 'GitOrigin').Status -eq 'Pass') 'exact official SSH origin accepted'
 
+    $unofficialHome = Join-Path $testRoot 'unofficial-home'
+    $unofficialGit = Join-Path $unofficialHome 'hermes-agent\.git'
+    New-Item -ItemType Directory -Path $unofficialGit -Force | Out-Null
+    $unofficialOrigin = 'https://origin-user:origin-secret@github.com/evil/example.git'
+    $unofficialConfig = "[remote `"origin`"]`r`n`turl = $unofficialOrigin`r`n"
+    [System.IO.File]::WriteAllText((Join-Path $unofficialGit 'config'), $unofficialConfig, $encoding)
+    $unofficial = Get-HermesPreflight -HermesHome $unofficialHome -RuntimeRoot (Join-Path $testRoot 'unofficial-runtime')
+    $unofficialDetails = @($unofficial.Checks | ForEach-Object { [string]$_.Detail }) -join ' '
+    Assert-SecurityTrue ((Get-Check $unofficial 'GitOrigin').Status -eq 'Fail' -and $unofficialDetails -notmatch 'origin-user|origin-secret') 'preflight rejects and redacts non-official origin'
+    Assert-SecurityTrue ([string]$unofficial.ExistingOrigin -eq '[NON-OFFICIAL-REDACTED]') 'preflight JSON redacts non-official origin'
+
+    $trustedGit = Get-HermesVerificationGitPath -HermesHome $unofficialHome
+    $verificationHome = Join-Path $testRoot 'verification-origin-home'
+    $verificationRepo = Join-Path $verificationHome 'hermes-agent'
+    New-Item -ItemType Directory -Path $verificationRepo -Force | Out-Null
+    $initResult = Invoke-HermesProcess -FilePath $trustedGit -ArgumentList @('init', $verificationRepo) -TimeoutSeconds 30
+    $remoteResult = Invoke-HermesProcess -FilePath $trustedGit -ArgumentList @('-C', $verificationRepo, 'remote', 'add', 'origin', $unofficialOrigin) -TimeoutSeconds 30
+    Assert-SecurityTrue ($initResult.ExitCode -eq 0 -and $remoteResult.ExitCode -eq 0) 'non-official origin verification fixture created'
+    0..21 | ForEach-Object { [System.IO.File]::WriteAllText((Join-Path $verificationRepo ('dirty-{0:D2}.txt' -f $_)), 'fixture', $encoding) }
+    [System.IO.File]::WriteAllText((Join-Path $verificationRepo 'API_KEY=file-secret.txt'), 'fixture', $encoding)
+    $originVerification = Test-HermesInstallation -HermesHome $verificationHome -InstallDir $verificationRepo -RuntimeRoot (Join-Path $testRoot 'verification-origin-runtime')
+    Assert-SecurityTrue (-not $originVerification.OriginOfficial -and [string]$originVerification.Origin -eq '[NON-OFFICIAL-REDACTED]') 'verification JSON redacts non-official origin'
+    Assert-SecurityTrue ([bool]$originVerification.CheckoutStatusTruncated -and ([string]$originVerification.CheckoutStatus).Length -le 4096) 'checkout diagnostics cap status lines and characters'
+    Assert-SecurityTrue ([string]$originVerification.CheckoutStatus -notmatch 'file-secret|origin-secret' -and @($originVerification.FailedChecks) -contains 'CheckoutClean') 'checkout diagnostics redact secret filenames and name dirty failure'
+
     $fakeBin = Join-Path $testRoot 'fake-bin'
     New-Item -ItemType Directory -Path $fakeBin -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $fakeBin 'hermes.cmd'), '@exit /b 0', $encoding)
@@ -109,11 +134,12 @@ try {
     Assert-SecurityTrue ($resetState.stages[0].status -eq 'Pending') 'safe resume reapplies automatic stages'
 
     $diagnosticPaths = Get-HermesDefaultPaths -HermesHome (Join-Path $testRoot 'private-home') -RuntimeRoot (Join-Path $testRoot 'private-runtime')
-    $privateText = "$($diagnosticPaths.HermesHome) $([Environment]::GetFolderPath('UserProfile'))?token=secret-value"
+    $privateText = "$($diagnosticPaths.HermesHome) $([Environment]::GetFolderPath('UserProfile'))?token=secret-value https://diag-user:diag-password@example.com/path"
     $protectedText = Protect-HermesDiagnosticText -Text $privateText -Paths $diagnosticPaths
     Assert-SecurityTrue ($protectedText -notmatch [regex]::Escape($diagnosticPaths.HermesHome)) 'diagnostic text removes Hermes absolute path'
     Assert-SecurityTrue ($protectedText -notmatch [regex]::Escape([Environment]::GetFolderPath('UserProfile'))) 'diagnostic text removes user profile path'
     Assert-SecurityTrue ($protectedText -notmatch 'secret-value') 'diagnostic text removes URL query secret'
+    Assert-SecurityTrue ($protectedText -notmatch 'diag-user|diag-password') 'diagnostic text removes URL userinfo secret'
 } finally {
     if (Test-Path -LiteralPath $testRoot -PathType Container) {
         $tempPrefix = [System.IO.Path]::GetFullPath($tempBase)

@@ -49,6 +49,10 @@ try {
     $verifyExit = $LASTEXITCODE
     $verification = $verifyOutput[-1] | ConvertFrom-Json
     Assert-CliTrue ($verifyExit -eq 50 -and -not [bool]$verification.Verified) 'Verify fails closed when target installation is absent'
+    Assert-CliTrue (@($verification.FailedChecks) -contains 'CommandWorks' -and @($verification.FailedChecks) -contains 'CheckoutPresent') 'Verify names failed Boolean properties without exposing ambient data'
+    Assert-CliTrue ($verification.PSObject.Properties.Name -contains 'CheckoutStatus' -and $verification.PSObject.Properties.Name -contains 'GitStatusExitCode') 'Verify exposes bounded checkout diagnostics'
+    Assert-CliTrue ($verification.PSObject.Properties.Name -contains 'CheckoutStatusTruncated' -and ([string]$verification.CheckoutStatus).Length -le 4096) 'Verify hard-caps checkout diagnostics'
+    Assert-CliTrue ([string]::IsNullOrWhiteSpace([string]$verification.Origin) -or [string]$verification.Origin -eq '[NON-OFFICIAL-REDACTED]' -or [bool]$verification.OriginOfficial) 'Verify never exposes a raw non-official origin'
 } finally {
     if (Test-Path -LiteralPath $testRoot -PathType Container) {
         $tempPrefix = [System.IO.Path]::GetFullPath($tempBase)

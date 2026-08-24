@@ -55,11 +55,57 @@ jobs:
           $plan = $planText | ConvertFrom-Json
 
           & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -SetupMode Later -ExpectedPlanFingerprint $plan.Fingerprint -JsonEvents
-          if ($LASTEXITCODE -ne 0) { throw "Install failed with exit code $LASTEXITCODE" }
+          $installExit = $LASTEXITCODE
 
           $verifyText = & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Verify -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -Json
-          if ($LASTEXITCODE -ne 0) { throw "Verify failed with exit code $LASTEXITCODE" }
-          $verify = $verifyText | ConvertFrom-Json
+          $verifyExit = $LASTEXITCODE
+          $verify = $null
+          $verifyFrames = @($verifyText)
+          if ($verifyFrames.Count -gt 0) {
+            try { $verify = $verifyFrames[-1] | ConvertFrom-Json } catch { Write-Host 'Verify JSON parsing failed.' }
+          }
+          if ($installExit -ne 0 -or $verifyExit -ne 0 -or $null -eq $verify) {
+            $safeDiagnostic = [ordered]@{
+              InstallExit = $installExit
+              VerifyExit = $verifyExit
+              VerifyJsonParsed = ($null -ne $verify)
+              Verified = [bool]$verify.Verified
+              CommandWorks = [bool]$verify.CommandWorks
+              VenvPythonPresent = [bool]$verify.VenvPythonPresent
+              CheckoutPresent = [bool]$verify.CheckoutPresent
+              CheckoutHeadMatches = [bool]$verify.CheckoutHeadMatches
+              OriginOfficial = [bool]$verify.OriginOfficial
+              CheckoutClean = [bool]$verify.CheckoutClean
+              BootstrapMarker = [bool]$verify.BootstrapMarker
+              MarkerMatches = [bool]$verify.MarkerMatches
+              GitStatusExitCode = $verify.GitStatusExitCode
+              FailedChecks = @($verify.FailedChecks)
+              CheckoutStatus = [string]$verify.CheckoutStatus
+              CheckoutStatusTruncated = [bool]$verify.CheckoutStatusTruncated
+            }
+            Write-Host ('Product verification diagnostics: ' + ($safeDiagnostic | ConvertTo-Json -Compress -Depth 4))
+            Remove-Item Env:GIT_CONFIG_GLOBAL -ErrorAction SilentlyContinue
+            Remove-Item Env:GIT_COMMON_DIR -ErrorAction SilentlyContinue
+            Remove-Item Env:GIT_NAMESPACE -ErrorAction SilentlyContinue
+            Import-Module (Join-Path $env:GITHUB_WORKSPACE 'src\HermesEasySetup.Loader.psm1') -Force
+            $diagnosticGit = Get-HermesVerificationGitPath -HermesHome $hermesHome
+            if (-not [string]::IsNullOrWhiteSpace($diagnosticGit) -and (Test-Path -LiteralPath (Join-Path $installDir '.git'))) {
+              $diagnosticPlan = [pscustomobject]@{ HermesHome = $hermesHome; RuntimeRoot = $runtimeRoot }
+              $diagnosticEnvironment = New-HermesStageEnvironment -Plan $diagnosticPlan -Stage 'repository'
+              try {
+                $diagnosticProcess = Invoke-HermesProcess -FilePath $diagnosticGit -ArgumentList @('-C', $installDir, 'status', '--porcelain=v1', '--untracked-files=normal') -Environment $diagnosticEnvironment -TimeoutSeconds 60
+                $diagnosticCandidates = @($diagnosticProcess.StdOut -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 21)
+                $diagnosticStatus = Protect-HermesLogText ((@($diagnosticCandidates | Select-Object -First 20)) -join '; ')
+                $diagnosticTruncated = ($diagnosticCandidates.Count -gt 20 -or $diagnosticStatus.Length -gt 4096)
+                if ($diagnosticStatus.Length -gt 4096) { $diagnosticStatus = $diagnosticStatus.Substring(0, 4096) }
+                $diagnosticStatusResult = [ordered]@{ ExitCode = $diagnosticProcess.ExitCode; TimedOut = $diagnosticProcess.TimedOut; Status = $diagnosticStatus; Truncated = $diagnosticTruncated }
+                Write-Host ('Independent checkout diagnostics: ' + ($diagnosticStatusResult | ConvertTo-Json -Compress -Depth 3))
+              } finally {
+                Remove-HermesStageEnvironmentArtifacts -Environment $diagnosticEnvironment -Plan $diagnosticPlan
+              }
+            }
+            throw "Install/Verify failed with exit codes $installExit/$verifyExit"
+          }
           if (-not [bool]$verify.Verified -or -not [bool]$verify.CheckoutClean -or -not [bool]$verify.OriginOfficial) { throw 'Product provenance verification did not pass.' }
           Remove-Item Env:GIT_CONFIG_GLOBAL
           Remove-Item Env:GIT_COMMON_DIR
