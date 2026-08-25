@@ -248,17 +248,21 @@ try {
         }
         Assert-True (@($trustedWindowsCommandPaths).Count -eq 5 -and @($trustedWindowsCommandPaths | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }).Count -eq 0) 'signed System32 command canaries pass trust validation'
         $appExecutionAliasChecks = & $installEngineModule {
+            param($plan, $trustedGit)
             $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
             @('winget.exe', 'python.exe') | ForEach-Object {
                 $path = Join-Path $localAppData (Join-Path 'Microsoft\WindowsApps' $_)
+                $exists = Test-Path -LiteralPath $path -PathType Leaf
+                $commandName = [System.IO.Path]::GetFileNameWithoutExtension($_)
                 [pscustomobject]@{
                     Name = $_
-                    Exists = (Test-Path -LiteralPath $path -PathType Leaf)
-                    Trusted = $(if (Test-Path -LiteralPath $path -PathType Leaf) { Test-HermesWindowsAppExecutionAlias -LiteralPath $path -ExpectedName $_ } else { $true })
+                    Exists = $exists
+                    Trusted = $(if ($exists) { Test-HermesWindowsAppExecutionAlias -LiteralPath $path -ExpectedName $_ } else { $false })
+                    Accepted = $(if ($exists) { Test-HermesTrustedBareCommandCandidate -Plan $plan -CommandName $commandName -LiteralPath $path -TrustedGitPath $trustedGit -ManagedCommandProof @{} } else { $false })
                 }
             }
-        }
-        Assert-True (@($appExecutionAliasChecks | Where-Object { [bool]$_.Exists -and -not [bool]$_.Trusted }).Count -eq 0) 'present winget and Python AppExecLink aliases are package-bound'
+        } $planA $signedSystemGit
+        Assert-True (@($appExecutionAliasChecks | Where-Object { [bool]$_.Exists -and [bool]$_.Accepted -ne [bool]$_.Trusted }).Count -eq 0) 'only package-bound winget and Python AppExecLink aliases are accepted'
         $vbsOnlyGitDirectory = Join-Path $testRootFull 'vbs-only-registry-git'
         New-Item -ItemType Directory -Path $vbsOnlyGitDirectory -Force | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $vbsOnlyGitDirectory 'git.vbs'), 'WScript.Echo "hostile"', (New-Object System.Text.ASCIIEncoding))
