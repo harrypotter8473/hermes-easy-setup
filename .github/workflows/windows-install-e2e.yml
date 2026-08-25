@@ -66,7 +66,13 @@ jobs:
             if (Test-Path -LiteralPath $cleanTarget) { throw "MVP policy rejection mutated target: $cleanTarget" }
           }
 
-          $originalUserRegistryPath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User)
+          Import-Module (Join-Path $env:GITHUB_WORKSPACE 'src\HermesEasySetup.Loader.psm1') -Force
+          $baselineGit = Get-HermesVerificationGitPath -HermesHome $hermesHome
+          if ([string]::IsNullOrWhiteSpace($baselineGit)) { throw 'No trusted Program Files Git is available for the E2E registry PATH baseline.' }
+          $baselineGitDirectory = Split-Path -Parent $baselineGit
+          $runnerUserRegistryPath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User)
+          $originalUserRegistryPath = $(if ([string]::IsNullOrWhiteSpace($runnerUserRegistryPath)) { $baselineGitDirectory } else { "$baselineGitDirectory;$runnerUserRegistryPath" })
+          [Environment]::SetEnvironmentVariable('Path', $originalUserRegistryPath, [EnvironmentVariableTarget]::User)
           try {
             $hostileUserRegistryPath = $(if ([string]::IsNullOrWhiteSpace($originalUserRegistryPath)) { $hostileGitBin } else { $hostileGitBin + [System.IO.Path]::PathSeparator + $originalUserRegistryPath })
             [Environment]::SetEnvironmentVariable('Path', $hostileUserRegistryPath, [EnvironmentVariableTarget]::User)
