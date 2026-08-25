@@ -496,7 +496,8 @@ function Get-HermesInstallerManifest {
 
     $powershell = Get-HermesPowerShellExecutable
     $common = @(Get-HermesInstallerArguments -Plan $Plan -SourceConfig $SourceConfig)
-    $environment = @{ HERMES_HOME = [string]$Plan.HermesHome }
+    $environment = Get-HermesCuratedProcessEnvironment
+    $environment['HERMES_HOME'] = [string]$Plan.HermesHome
 
     # Validate immediately before each executable boundary. The same public
     # assertion is available to the stage driver for every -Stage invocation.

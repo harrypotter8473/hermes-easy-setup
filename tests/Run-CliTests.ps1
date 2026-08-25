@@ -39,6 +39,18 @@ try {
     Assert-CliTrue ($guardExit -eq 2 -and [int]$guardError.exit_code -eq 2 -and [string]$guardError.message -like '*-Apply*') 'Install without Apply is default-deny'
     Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) 'Apply guard creates no runtime state'
 
+    $computerUseOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SetupMode Later -Json)
+    $computerUseExit = $LASTEXITCODE
+    $computerUseError = $computerUseOutput[-1] | ConvertFrom-Json
+    Assert-CliTrue ($computerUseExit -eq 10 -and [int]$computerUseError.exit_code -eq 10 -and [string]$computerUseError.message -like '*Computer Use*') 'v0.1.1 fails closed before automatic Computer Use bootstrap'
+    Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) 'Computer Use policy rejection precedes runtime mutation'
+
+    $desktopOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -IncludeDesktop -SetupMode Later -Json)
+    $desktopExit = $LASTEXITCODE
+    $desktopError = $desktopOutput[-1] | ConvertFrom-Json
+    Assert-CliTrue ($desktopExit -eq 10 -and [int]$desktopError.exit_code -eq 10 -and [string]$desktopError.message -like '*Desktop*') 'v0.1.1 scope is limited to the base Hermes CLI install'
+    Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) 'Desktop policy rejection precedes runtime mutation'
+
     $mismatchOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -SetupMode Later -ExpectedPlanFingerprint ('0' * 64) -Json)
     $mismatchExit = $LASTEXITCODE
     $mismatchError = $mismatchOutput[-1] | ConvertFrom-Json
@@ -50,7 +62,13 @@ try {
     $verification = $verifyOutput[-1] | ConvertFrom-Json
     Assert-CliTrue ($verifyExit -eq 50 -and -not [bool]$verification.Verified) 'Verify fails closed when target installation is absent'
     Assert-CliTrue (@($verification.FailedChecks) -contains 'CommandWorks' -and @($verification.FailedChecks) -contains 'CheckoutPresent') 'Verify names failed Boolean properties without exposing ambient data'
+    Assert-CliTrue (@($verification.FailedChecks) -contains 'ManagedLaunchersValid' -and @($verification.FailedChecks) -contains 'ManagedLauncherExclusionsValid') 'Verify fails closed when managed launcher invariants are absent'
+    Assert-CliTrue (@($verification.FailedChecks) -contains 'RepositoryMetadataSafe' -and @($verification.FailedChecks) -contains 'LauncherAttestationValid') 'Verify names metadata and launcher attestation failures'
     Assert-CliTrue ($verification.PSObject.Properties.Name -contains 'CheckoutStatus' -and $verification.PSObject.Properties.Name -contains 'GitStatusExitCode') 'Verify exposes bounded checkout diagnostics'
+    Assert-CliTrue ($verification.PSObject.Properties.Name -contains 'ManagedLaunchersValid' -and $verification.PSObject.Properties.Name -contains 'ManagedLauncherExclusionsValid' -and $verification.PSObject.Properties.Name -contains 'LauncherAttestationValid') 'Verify exposes managed launcher integrity and attestation results'
+    Assert-CliTrue ($verification.PSObject.Properties.Name -contains 'GitExcludesIsolated' -and $verification.PSObject.Properties.Name -contains 'LocalExcludeOverrideAbsent') 'Verify exposes Git exclude isolation results'
+    Assert-CliTrue ($verification.PSObject.Properties.Name -contains 'CheckoutLayoutValid' -and $verification.PSObject.Properties.Name -contains 'IndexMatchesExpectedTree' -and $verification.PSObject.Properties.Name -contains 'IndexFlagsClean' -and $verification.PSObject.Properties.Name -contains 'LocalGitConfigSafe' -and $verification.PSObject.Properties.Name -contains 'RepositoryMetadataSafe' -and $verification.PSObject.Properties.Name -contains 'NoGitLinks') 'Verify exposes static Git metadata, layout, and index attestation'
+    Assert-CliTrue ($verification.PSObject.Properties.Name -contains 'StaticProvenanceValid' -and -not [bool]$verification.StaticProvenanceValid -and $verification.PSObject.Properties.Name -contains 'VersionStartFailed') 'Verify exposes static provenance and process-start diagnostics'
     Assert-CliTrue ($verification.PSObject.Properties.Name -contains 'CheckoutStatusTruncated' -and ([string]$verification.CheckoutStatus).Length -le 4096) 'Verify hard-caps checkout diagnostics'
     Assert-CliTrue ([string]::IsNullOrWhiteSpace([string]$verification.Origin) -or [string]$verification.Origin -eq '[NON-OFFICIAL-REDACTED]' -or [bool]$verification.OriginOfficial) 'Verify never exposes a raw non-official origin'
 } finally {

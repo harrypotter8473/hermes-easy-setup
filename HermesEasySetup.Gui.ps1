@@ -218,7 +218,7 @@ $ui.InstallButton.Add_Click({ Start-InstallWorker })
 $ui.FinishButton.Add_Click({ $window.Close() })
 $ui.SetupButton.Add_Click({
     try {
-        [void](Start-HermesOfficialSetup -HermesHome $script:paths.HermesHome -InstallDir $script:paths.InstallDir -Mode (Get-SelectedSetupMode))
+        [void](Start-HermesOfficialSetup -HermesHome $script:paths.HermesHome -InstallDir $script:paths.InstallDir -RuntimeRoot $script:paths.RuntimeRoot -Mode (Get-SelectedSetupMode))
         [Windows.MessageBox]::Show('공식 Hermes 설정 창을 열었습니다. 이 마법사를 닫아도 됩니다.', 'Hermes Easy Setup') | Out-Null
     } catch { [Windows.MessageBox]::Show((Protect-HermesLogText $_.Exception.Message), '설정을 열 수 없음', 'OK', 'Error') | Out-Null }
 })

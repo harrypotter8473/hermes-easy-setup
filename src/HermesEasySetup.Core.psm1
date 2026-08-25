@@ -42,6 +42,21 @@ function Get-HermesEasySetupExitCodes {
     return [pscustomobject]$script:ExitCodes
 }
 
+function ConvertTo-HermesCanonicalDirectoryPath {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    if ($LiteralPath -match '(?i)(?:^|[\\/])[^\\/]*~[0-9]+(?:\.[^\\/]*)?(?:[\\/]|$)') {
+        Throw-HermesEasySetupError -Message 'DOS 8.3 짧은 경로 표기는 지원하지 않습니다. 긴 절대 경로를 지정하세요.' -ExitCode 10 -Category 'PathSafety'
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
+    $rootPath = [System.IO.Path]::GetPathRoot($fullPath)
+    if ([string]::Equals($fullPath, $rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $fullPath
+    }
+    return $fullPath.TrimEnd('\', '/')
+}
+
 function Get-HermesDefaultPaths {
     [CmdletBinding()]
     param(
@@ -60,9 +75,9 @@ function Get-HermesDefaultPaths {
     if ([string]::IsNullOrWhiteSpace($InstallDir)) { $InstallDir = Join-Path $HermesHome 'hermes-agent' }
     if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) { $RuntimeRoot = Join-Path $localAppData 'HermesEasySetup' }
 
-    $fullHome = [System.IO.Path]::GetFullPath($HermesHome)
-    $fullInstall = [System.IO.Path]::GetFullPath($InstallDir)
-    $fullRuntime = [System.IO.Path]::GetFullPath($RuntimeRoot)
+    $fullHome = ConvertTo-HermesCanonicalDirectoryPath -LiteralPath $HermesHome
+    $fullInstall = ConvertTo-HermesCanonicalDirectoryPath -LiteralPath $InstallDir
+    $fullRuntime = ConvertTo-HermesCanonicalDirectoryPath -LiteralPath $RuntimeRoot
     return [pscustomobject]@{
         HermesHome  = $fullHome
         InstallDir  = $fullInstall
@@ -71,6 +86,7 @@ function Get-HermesDefaultPaths {
         LogDir      = [System.IO.Path]::GetFullPath((Join-Path $fullRuntime 'logs'))
         StateDir    = [System.IO.Path]::GetFullPath((Join-Path $fullRuntime 'state'))
         StateFile   = [System.IO.Path]::GetFullPath((Join-Path $fullRuntime 'state\install-state.json'))
+        LauncherAttestationFile = [System.IO.Path]::GetFullPath((Join-Path $fullRuntime 'state\launcher-attestation-v1.json'))
     }
 }
 
@@ -243,8 +259,14 @@ function Test-HermesSafeTargetPath {
     if ($LiteralPath.StartsWith('\\?\') -or $LiteralPath.StartsWith('\\.\') -or $LiteralPath.StartsWith('\\')) {
         return [pscustomobject]@{ Safe = $false; Reason = "$Label 경로로 device/UNC 경로를 사용할 수 없습니다." }
     }
+    if ($LiteralPath -match '(?i)(?:^|[\\/])[^\\/]*~[0-9]+(?:\.[^\\/]*)?(?:[\\/]|$)') {
+        return [pscustomobject]@{ Safe = $false; Reason = "$Label 경로에 DOS 8.3 짧은 경로 표기를 사용할 수 없습니다. 긴 경로를 지정하세요." }
+    }
     try { $full = [System.IO.Path]::GetFullPath($LiteralPath) } catch { return [pscustomobject]@{ Safe = $false; Reason = "$Label 경로가 올바르지 않습니다." } }
     if (-not [System.IO.Path]::IsPathRooted($full)) { return [pscustomobject]@{ Safe = $false; Reason = "$Label 경로는 절대 경로여야 합니다." } }
+    if ($full -match '(?i)(?:^|[\\/])[^\\/]*~[0-9]+(?:\.[^\\/]*)?(?:[\\/]|$)') {
+        return [pscustomobject]@{ Safe = $false; Reason = "$Label 경로에 DOS 8.3 짧은 경로 표기를 사용할 수 없습니다. 긴 경로를 지정하세요." }
+    }
     $root = [System.IO.Path]::GetPathRoot($full).TrimEnd('\', '/')
     $trimmed = $full.TrimEnd('\', '/')
     if ($trimmed -eq $root) { return [pscustomobject]@{ Safe = $false; Reason = "$Label 경로로 드라이브 루트를 사용할 수 없습니다." } }

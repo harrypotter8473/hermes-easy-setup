@@ -4,6 +4,7 @@ $script:HermesExecutionMaximumStreamBytes = 4MB
 $script:HermesExecutionTreeKillWaitMilliseconds = 10000
 $script:HermesExecutionExitWaitMilliseconds = 5000
 $script:HermesExecutionStreamWaitMilliseconds = 5000
+$script:HermesExecutionReplaceEnvironmentKey = '__HERMES_EASY_SETUP_REPLACE_ENVIRONMENT'
 
 function Get-HermesExecutionWindowsDirectory {
     $windowsDirectory = [Environment]::GetFolderPath('Windows')
@@ -197,6 +198,39 @@ function Get-HermesPowerShellExecutable {
         -DisplayName 'Windows PowerShell' -RequireMicrosoftSignature
 }
 
+function Get-HermesCuratedProcessEnvironment {
+    [CmdletBinding()]
+    param()
+
+    $environment = @{}
+    foreach ($name in @(
+        'ALLUSERSPROFILE', 'APPDATA', 'CommonProgramFiles', 'CommonProgramFiles(x86)', 'CommonProgramW6432',
+        'COMPUTERNAME', 'DriverData', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'NUMBER_OF_PROCESSORS',
+        'OS', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_ARCHITEW6432', 'PROCESSOR_IDENTIFIER', 'PROCESSOR_LEVEL',
+        'PROCESSOR_REVISION', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'PUBLIC',
+        'SystemDrive', 'TEMP', 'TMP', 'USERDOMAIN', 'USERDOMAIN_ROAMINGPROFILE', 'USERNAME', 'USERPROFILE',
+        'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+        'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
+        'CI', 'GITHUB_ACTIONS', 'ChocolateyInstall', 'ChocolateyToolsLocation',
+        'POWERSHELL_TELEMETRY_OPTOUT', 'DOTNET_CLI_TELEMETRY_OPTOUT', 'DOTNET_NOLOGO', 'PATH', 'PATHEXT'
+    )) {
+        $value = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        if ($null -ne $value) { $environment[$name] = $value }
+    }
+
+    $windowsDirectory = Get-HermesExecutionWindowsDirectory
+    $environment['SystemRoot'] = $windowsDirectory
+    $environment['WINDIR'] = $windowsDirectory
+    $environment['ComSpec'] = Get-HermesExecutionSystemExecutable -RelativePath 'System32\cmd.exe' -DisplayName 'cmd.exe' -RequireMicrosoftSignature
+    $systemModulePath = Join-Path $windowsDirectory 'System32\WindowsPowerShell\v1.0\Modules'
+    if (-not (Test-Path -LiteralPath $systemModulePath -PathType Container)) {
+        throw 'The system PowerShell module directory could not be resolved.'
+    }
+    $environment['PSModulePath'] = [System.IO.Path]::GetFullPath($systemModulePath)
+    $environment[$script:HermesExecutionReplaceEnvironmentKey] = '1'
+    return $environment
+}
+
 function Invoke-HermesProcess {
     [CmdletBinding()]
     param(
@@ -218,8 +252,13 @@ function Invoke-HermesProcess {
     $info.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false)
     $info.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false)
     if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) { $info.WorkingDirectory = $WorkingDirectory }
+    if ($Environment.ContainsKey($script:HermesExecutionReplaceEnvironmentKey) -and
+        [string]$Environment[$script:HermesExecutionReplaceEnvironmentKey] -ceq '1') {
+        $info.EnvironmentVariables.Clear()
+    }
     foreach ($key in $Environment.Keys) {
         $environmentKey = [string]$key
+        if ($environmentKey -ceq $script:HermesExecutionReplaceEnvironmentKey) { continue }
         if ($null -eq $Environment[$key]) {
             [void]$info.EnvironmentVariables.Remove($environmentKey)
         } else {
@@ -231,7 +270,42 @@ function Invoke-HermesProcess {
     $process.StartInfo = $info
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        if (-not $process.Start()) { throw "Process could not be started: $FilePath" }
+        try {
+            $started = $process.Start()
+        } catch {
+            $nativeErrorCode = $(if ($_.Exception -is [System.ComponentModel.Win32Exception]) { [int]$_.Exception.NativeErrorCode } else { $null })
+            $elapsed = [int64]$watch.ElapsedMilliseconds
+            $duration = $(if ($elapsed -gt [int]::MaxValue) { [int]::MaxValue } else { [int]$elapsed })
+            return [pscustomobject]@{
+                FilePath = $FilePath
+                Arguments = @($ArgumentList)
+                Started = $false
+                ExitCode = -1
+                StdOut = ''
+                StdErr = ''
+                TimedOut = $false
+                DurationMs = $duration
+                StartFailure = 'ProcessStartFailed'
+                NativeErrorCode = $nativeErrorCode
+            }
+        }
+        if (-not $started) {
+            $elapsed = [int64]$watch.ElapsedMilliseconds
+            $duration = $(if ($elapsed -gt [int]::MaxValue) { [int]::MaxValue } else { [int]$elapsed })
+            return [pscustomobject]@{
+                FilePath = $FilePath
+                Arguments = @($ArgumentList)
+                Started = $false
+                ExitCode = -1
+                StdOut = ''
+                StdErr = ''
+                TimedOut = $false
+                DurationMs = $duration
+                StartFailure = 'ProcessStartFailed'
+                NativeErrorCode = $null
+            }
+        }
+
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $timedOut = $false
@@ -255,13 +329,16 @@ function Invoke-HermesProcess {
         $elapsed = [int64]$watch.ElapsedMilliseconds
         $duration = $(if ($elapsed -gt [int]::MaxValue) { [int]::MaxValue } else { [int]$elapsed })
         return [pscustomobject]@{
-            FilePath   = $FilePath
-            Arguments  = @($ArgumentList)
-            ExitCode   = $exitCode
-            StdOut     = $stdout
-            StdErr     = $stderr
-            TimedOut   = $timedOut
+            FilePath = $FilePath
+            Arguments = @($ArgumentList)
+            Started = $true
+            ExitCode = $exitCode
+            StdOut = $stdout
+            StdErr = $stderr
+            TimedOut = $timedOut
             DurationMs = $duration
+            StartFailure = $null
+            NativeErrorCode = $null
         }
     } finally {
         $watch.Stop()
@@ -342,6 +419,7 @@ function Write-HermesCapturedOutput {
 Export-ModuleMember -Function @(
     'ConvertTo-WindowsProcessArgument',
     'Get-HermesPowerShellExecutable',
+    'Get-HermesCuratedProcessEnvironment',
     'Invoke-HermesProcess',
     'ConvertFrom-HermesJsonFrame',
     'Publish-HermesEvent',

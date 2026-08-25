@@ -87,7 +87,7 @@ try {
             if (-not [string]::IsNullOrWhiteSpace($SourceConfigPath)) { $installArguments.SourceConfigPath = $SourceConfigPath }
             $result = Invoke-HermesInstall @installArguments
             if ($LaunchSetup -and $SetupMode -ne 'Later') {
-                $result | Add-Member -NotePropertyName SetupLaunch -NotePropertyValue (Start-HermesOfficialSetup -HermesHome $result.Plan.HermesHome -InstallDir $result.Plan.InstallDir -Mode $SetupMode)
+                $result | Add-Member -NotePropertyName SetupLaunch -NotePropertyValue (Start-HermesOfficialSetup -HermesHome $result.Plan.HermesHome -InstallDir $result.Plan.InstallDir -RuntimeRoot $result.Plan.RuntimeRoot -Mode $SetupMode)
             }
             if (-not $JsonEvents) { Write-ResultObject $result }
         }
@@ -96,7 +96,7 @@ try {
             Write-ResultObject $result
             if (-not $result.Verified) { exit $exitCodes.VerificationFailed }
         }
-        'Setup' { Write-ResultObject (Start-HermesOfficialSetup -HermesHome $HermesHome -InstallDir $InstallDir -Mode $SetupMode) }
+        'Setup' { Write-ResultObject (Start-HermesOfficialSetup -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot -Mode $SetupMode) }
         'Bundle' {
             $arguments = @{ HermesHome = $HermesHome; InstallDir = $InstallDir; RuntimeRoot = $RuntimeRoot; DestinationPath = $DestinationPath }
             if (-not [string]::IsNullOrWhiteSpace($SourceConfigPath)) { $arguments.SourceConfigPath = $SourceConfigPath }

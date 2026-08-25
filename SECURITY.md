@@ -34,15 +34,31 @@
 - PATH의 `hermes`나 `powershell.exe`
 - 사용자가 지정한 mutable 경로
 - 새 clone의 사용자 global Git 줄바꿈 설정과 command parameter 주입
+- 상류 설치기가 다시 읽는 User/Machine registry PATH의 명령 순서, ambient PATHEXT와 사용자 PowerShell module 경로
+- 기존 launcher attestation과 RuntimeRoot 상태
 
 검증 실패 시 설치는 계속 진행하지 않습니다. 사용자 승인 계획 지문은 첫 변경 직전에 다시 확인하고, 설치기는 protocol/manifest와 매 stage 실행 직전에 재해시합니다.
 
-새 설치의 `repository` 단계는 RuntimeRoot 아래 예측 불가능한 이름의 UTF-8 no-BOM Git global/빈 attributes 파일을 `CreateNew`로 만들고 `core.autocrlf=false`를 clone 전에 적용합니다. repository 프로세스 종료 뒤 두 일회성 파일을 제거합니다. 사용자 global 파일 자체는 수정하지 않으며 이 단계에서는 읽지 않습니다. Program Files의 유효하게 서명된 Git for Windows를 설치 시작 전에 요구하고 모든 공식 stage의 PATH 선두에 고정합니다. 따라서 공식 설치기의 PATH Git 실행 및 해시 미고정 portable Git 다운로드 경로는 사용하지 않습니다. `GIT_COMMON_DIR`를 포함한 repository/object/config redirect 환경도 제거합니다. 이 경계는 fresh-clone 줄바꿈 결정성과 user-global 주입 축소를 위한 것이지 Git 전체 격리는 아닙니다. system 설정과 네트워크 환경은 유지되고, 기존 checkout의 local 설정은 더 높은 우선순위를 가지며 dirty 상태는 예외 없이 실패합니다.
+새 설치의 `repository` 단계는 RuntimeRoot 아래 예측 불가능한 UTF-8 no-BOM managed global 설정과 빈 attributes/excludes 파일을 `CreateNew`로 만들고 `core.autocrlf=false`를 clone 전에 적용합니다. fresh clone에서는 system Git 설정과 표준 네트워크 환경을 유지하지만 user global은 읽지 않습니다. 기존/재개 checkout의 모든 stage와 정적 검증은 managed global을 별도로 만들고 system 설정도 끕니다. 모든 모드에서 Git redirect/UI/trace 환경을 제거하고 `GIT_CONFIG_COUNT=2`로 `core.hooksPath=NUL`, `core.fsmonitor=false`를 고정하며, PATHEXT는 `.COM;.EXE;.BAT;.CMD`, PSModulePath는 System32 module로 제한합니다.
+
+공식 설치기는 각 stage 시작 시 registry User+Machine PATH로 process PATH를 덮어씁니다. 따라서 설치 시작 전과 매 stage 직전에 그 PATH를 파일 I/O로 순서대로 해석해 첫 `git` 후보가 정확한 서명된 Program Files `git.exe`인지 확인합니다. 경쟁 `git.com/.bat/.cmd/.ps1`, 빈·잘못된 PATH 항목은 실패-폐쇄되며, 이 검사를 통과하지 못하면 상류 프로세스를 시작하지 않습니다.
+
+fresh repository 직후에는 exact HEAD/origin, clean status, 빈 active local exclude와 non-reparse 경로를 in-memory proof로 묶습니다. path 직전에 proof와 launcher 원본을 다시 확인하고, 대응 `venv\Scripts` 파일과 길이·SHA-256이 같고 유효한 bounded PE 헤더를 가진 exact `bin/hermes.exe`/`hermes-acp.exe` 두 개만 `.git/info/exclude`에 CAS 방식으로 등록합니다.
+
+그 직후 RuntimeRoot의 `state\launcher-attestation-v1.json`을 strict UTF-8 canonical JSON으로 한 번만 발행합니다. schema, contract, HermesHome/InstallDir/RuntimeRoot path binding SHA-256, peeled commit, 설치기 SHA-256, 두 launcher 이름·길이·SHA-256을 묶으며 기존 파일은 바이트가 완전히 같은 경우 외에는 교체하지 않습니다. 기존/재개 checkout은 이 attestation과 전체 정적 provenance가 이미 맞는 경우만 읽기 전용으로 허용합니다. 일반 caught failure는 이번 실행이 쓴 attestation을 제거하므로, 재개는 attestation과 동일 checkpoint가 남은 제한적 비정상 종료에만 가능합니다.
+
+repository-aware Git 전에 raw `.git/config`의 exact allowlist(상류의 단일 `windows.appendAtomically=false` 포함)를 적용하고 `commondir`, `config.worktree`, active `.git/info/attributes`, object alternates를 거부합니다. 그 뒤에만 격리된 서명 Git으로 raw origin, top-level/absolute git-dir, expected HEAD/index tree, index flags, gitlink 부재와 clean status를 검사합니다. Hermes 실행 직전 launcher와 attestation을 다시 확인합니다.
+
+path snapshot 뒤 후속 stage 또는 최종 Verify가 실패하면 PATH/HERMES_HOME 복구, launcher exclude CAS 복원, exact fresh launcher 삭제, 이번 실행 attestation 삭제를 서로 독립된 best-effort 작업으로 수행해 한 복구 실패가 나머지를 막지 않게 합니다. 이는 checkout, venv, dependencies와 실패 checkpoint 전체를 되돌리는 트랜잭션이나 제거 기능은 아닙니다.
 
 ## 보장 범위 밖
 
+- v0.1.1의 Computer Use 사전 설치와 Hermes Desktop 자동 빌드
+- DOS 8.3 짧은 경로 표기 지원(긴 절대 경로를 사용해야 함)
 - 공식 설치기가 받는 모든 전이 의존성의 완전한 고정·재현 빌드
+- launcher attestation 바깥의 전체 venv·Python/Node 패키지 진위
 - 같은 사용자 권한으로 동시에 실행되는 악성 프로세스가 만드는 모든 로컬 TOCTOU 공격
+- 같은 사용자 권한으로 RuntimeRoot와 InstallDir을 함께 수정해 launcher와 서명/MAC 없는 attestation을 다시 쓰는 지속적 로컬 위조
 - Windows 자체, GitHub, 패키지 registry 또는 upstream Hermes의 compromise
 - 코드 서명되지 않은 이 마법사 소스의 publisher identity
 - regex/best-effort 정제가 모든 종류의 새 비밀 형식을 제거한다는 보장

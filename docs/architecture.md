@@ -12,7 +12,7 @@ Hermes Easy Setup은 Hermes 설치 로직을 다시 구현하지 않습니다. �
   -> 첫 변경 직전 plan freshness
   -> stage별 재해시 + 제한시간 + JSON frame 검증
   -> 원자적 체크포인트
-  -> target launcher/venv/origin/HEAD/marker 검증
+  -> fresh-only launcher 정상화 + no-exec Git/index/launcher 정적 검증
   -> 보이는 공식 hermes setup 프로세스
 ```
 
@@ -41,9 +41,9 @@ CLI `Install`은 `-Apply`가 없으면 종료 코드 2로 중단됩니다. GUI�
 
 ## 경로와 기존 설치
 
-v1은 `InstallDir == HermesHome\hermes-agent`를 강제합니다. RuntimeRoot는 두 Hermes 경로와 서로 포함될 수 없습니다. drive root, 사용자 프로필 전체, Windows 폴더, UNC/device, wildcard와 기존 reparse 경로를 거부합니다.
+v1은 `InstallDir == HermesHome\hermes-agent`를 강제합니다. RuntimeRoot는 두 Hermes 경로와 서로 포함될 수 없습니다. drive root, 사용자 프로필 전체, Windows 폴더, UNC/device, wildcard, DOS 8.3 짧은 경로와 기존 reparse 경로를 거부합니다.
 
-비어 있지 않은 InstallDir은 정확한 공식 HTTPS 또는 SSH origin의 Git checkout이어야 합니다. PATH의 다른 `hermes`는 진단·검증·설정에 사용하지 않습니다.
+비어 있지 않은 InstallDir은 임의로 채택하지 않습니다. 오직 `-Resume`, 동일 계획/manifest의 resumable checkpoint, v0.1.1 launcher attestation과 전체 `StaticProvenanceValid`가 모두 맞는 동일 wizard 실행 경계만 읽기 전용으로 받아들입니다. 그 밖의 legacy/foreign checkout은 공식 origin이어도 새 빈 InstallDir을 요구합니다. PATH의 다른 `hermes`는 진단·검증·설정에 사용하지 않습니다.
 
 ## 공급망 경계
 
@@ -55,22 +55,31 @@ v1은 `InstallDir == HermesHome\hermes-agent`를 강제합니다. RuntimeRoot는
 
 각 자동 단계는 새 signed Windows PowerShell 프로세스에서 `-Stage`, `-Commit`, `-HermesHome`, `-InstallDir`, `-SkipSetup`, `-NonInteractive`, `-Json`으로 실행됩니다. stdout/stderr는 stream별 4 MiB로 제한하고 마지막 유효 JSON frame을 스키마 검증합니다.
 
-설치 시작 전에 Program Files의 유효하게 서명된 Git for Windows를 필수로 확인하고 모든 공식 stage의 PATH 선두에 둡니다. 이로써 상류 설치기의 PATH Git 실행과 해시 미고정 portable Git 다운로드를 피합니다. 새 checkout의 `repository` 단계에만 RuntimeRoot의 예측 불가능한 일회성 Git global/빈 attributes 파일을 `CreateNew`로 만들고 전달해 clone 최초 checkout부터 LF를 적용한 뒤 프로세스 종료 시 제거합니다. 사용자 global Git 파일은 읽거나 수정하지 않으며 기존 checkout에는 이 override를 적용하지 않아 상류의 local-change 보존/거부 동작을 유지합니다. 상류가 clone 직전 `GIT_CONFIG_COUNT`를 자체 사용하므로 command-scope 주입이 아니라 별도 global 파일을 사용합니다. `GIT_COMMON_DIR`를 포함한 config/repository/object redirect 환경은 제거합니다.
+설치 시작 전과 매 stage 직전에 registry User PATH 다음 Machine PATH를 순서대로 해석해 첫 `git` 명령이 서명된 Program Files `git.exe`와 정확히 일치하는지 확인합니다. 상류 `Sync-EnvPath`가 child process PATH prefix를 덮어쓰기 때문에 이 registry 검사가 필요합니다. child에는 `PATHEXT=.COM;.EXE;.BAT;.CMD`, System32-only PSModulePath, `core.hooksPath=NUL`, `core.fsmonitor=false`를 전달하고 Git redirect/UI/trace 환경을 제거합니다.
 
-일반 stage 제한은 30분, dependencies/node-deps/platform-sdks는 90분, Desktop은 180분입니다. timeout이면 정확한 System32 `taskkill.exe /T /F`로 해당 프로세스 트리를 정리합니다.
+fresh `repository`는 RuntimeRoot의 예측 불가능한 managed global 설정과 빈 attributes/excludes를 `CreateNew`로 만들고 LF checkout을 선행합니다. fresh mode는 system Git 설정을 유지합니다. 기존/재개 stage와 정적 verification은 별도 managed global을 쓰고 system 설정까지 끕니다. 세 모드 모두 user global 파일을 읽거나 수정하지 않으며 일회성 파일은 stage 뒤 제거합니다.
 
-`-Resume`은 schema, 실행 중/실패 상태, 계획 지문과 manifest가 모두 같은 경우만 허용됩니다. 이전 success 기록의 postcondition을 추측하지 않고 모든 자동 단계를 Pending으로 되돌려 공식 idempotent stage를 다시 적용합니다. `configure`와 `gateway`는 별도 대화형 설정으로 넘깁니다.
+v0.1.1은 기본 CLI stage만 실행하고 `-SkipComputerUse`를 강제합니다. Computer Use 사전 설치와 Desktop stage는 후속 버전까지 설치 진입 전에 거부합니다. 실행되는 일반 stage 제한은 30분, dependencies/node-deps/platform-sdks는 90분입니다. timeout이면 정확한 System32 `taskkill.exe /T /F`로 해당 프로세스 트리를 정리합니다. path snapshot 이후 caught failure는 PATH/HERMES_HOME, 이번 exclude write, exact launcher와 attestation을 독립적으로 compare/CAS 복구하지만 checkout·venv·dependencies·실패 state 전체를 원복하지는 않습니다.
+
+`-Resume`은 schema, Running/Failed 상태, 계획 지문, manifest와 v0.1.1 attestation의 전체 정적 provenance가 모두 같은 경우만 허용됩니다. 이전 success 기록은 재개하지 않습니다. fresh in-memory proof는 상태 파일에 저장하지 않고 정상 caught failure는 새 attestation도 제거하므로, attestation 발급 뒤 비정상 종료로 두 기록이 함께 남은 제한된 경우만 모든 자동 단계를 Pending으로 되돌려 공식 idempotent stage를 다시 적용합니다. `configure`와 `gateway`는 별도 대화형 설정으로 넘깁니다.
 
 ## 최종 provenance 검증
 
 성공에는 다음이 모두 필요합니다.
 
-- 대상 `InstallDir\bin\hermes.exe` 또는 `venv\Scripts\hermes.exe`가 실제 실행됨
-- `venv\Scripts\python.exe` 존재
+- `bin`에 exact `hermes.exe`/`hermes-acp.exe` 두 파일만 있고 대응 `venv\Scripts` launcher와 길이·SHA-256이 일치하며 DOS/PE 헤더가 구조적으로 유효
+- `.git/info/exclude`의 active 패턴이 exact 두 launcher뿐이며 예상 밖 `bin` 파일은 숨기지 않음
+- canonical `state\launcher-attestation-v1.json`의 path binding, peeled commit, installer digest와 두 launcher record가 현재 파일과 일치
+- `venv\Scripts\python.exe`가 non-reparse 일반 PE 파일로 존재
 - `.git` checkout과 서명된 Program Files Git 존재
-- origin이 정확한 공식 HTTPS/SSH 값
-- checkout이 clean이고 HEAD가 peeled pin과 정확히 일치
-- `.hermes-bootstrap-complete` schema 1과 pinnedCommit 일치
+- repository-aware Git 전에 raw `.git/config` exact allowlist, redirect 파일, active info attributes와 alternates 검사를 통과
+- raw local origin이 정확히 하나의 공식 HTTPS/SSH 값이며 top-level과 absolute git-dir가 예상 경로와 일치
+- HEAD와 index tree가 peeled pin tree와 일치하고 assume-unchanged/skip-worktree/gitlink가 없음
+- 격리된 Git status가 clean
+- bounded strict UTF-8 `.hermes-bootstrap-complete` schema 1과 pinnedCommit 일치
+- 위 정적 조건과 launcher/attestation 즉시 재검사를 모두 통과한 뒤에만 절대경로 `bin\hermes.exe --version` 실행
+
+attestation은 fresh same-run proof가 만든 연속성 기록이지만 서명/MAC은 아닙니다. 같은 사용자 권한이 RuntimeRoot와 InstallDir을 함께 수정하는 위조와 전체 venv·전이 dependency 진위는 이 모델 밖입니다.
 
 `hermes doctor`는 공급자 설정 전 경고가 날 수 있어 기록하되, 위 provenance 검증과 분리합니다.
 

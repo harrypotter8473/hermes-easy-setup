@@ -23,6 +23,27 @@ function Assert-Equal {
     Assert-True -Condition ($Expected -eq $Actual) -Name "$Name (expected=$Expected, actual=$Actual)"
 }
 
+function New-TestPortableExecutableBytes {
+    param([Parameter(Mandatory = $true)][string]$Seed)
+
+    $payload = [System.Text.Encoding]::ASCII.GetBytes($Seed)
+    $bytes = New-Object byte[] (512 + $payload.Length)
+    $bytes[0] = 0x4D
+    $bytes[1] = 0x5A
+    [BitConverter]::GetBytes([int]0x80).CopyTo($bytes, 0x3C)
+    $bytes[0x80] = 0x50
+    $bytes[0x81] = 0x45
+    $bytes[0x82] = 0
+    $bytes[0x83] = 0
+    [BitConverter]::GetBytes([uint16]0x8664).CopyTo($bytes, 0x84)
+    [BitConverter]::GetBytes([uint16]1).CopyTo($bytes, 0x86)
+    [BitConverter]::GetBytes([uint16]0xF0).CopyTo($bytes, 0x94)
+    [BitConverter]::GetBytes([uint16]0x22).CopyTo($bytes, 0x96)
+    [BitConverter]::GetBytes([uint16]0x20B).CopyTo($bytes, 0x98)
+    $payload.CopyTo($bytes, 0x1A0)
+    return ,$bytes
+}
+
 $tempBase = [System.IO.Path]::GetTempPath()
 $testRoot = Join-Path $tempBase ('hermes-easy-setup-tests-' + [guid]::NewGuid().ToString('N'))
 $testRootFull = [System.IO.Path]::GetFullPath($testRoot)
@@ -47,11 +68,23 @@ try {
     Assert-True ($redacted -match '\[REDACTED') 'redaction marker retained'
 
     Assert-True (-not (Test-HermesSafeTargetPath -LiteralPath 'C:\' -Label 'test').Safe) 'drive root target rejected'
+    Assert-True (-not (Test-HermesSafeTargetPath -LiteralPath 'C:\Users\FIRSTL~1\AppData\Local\hermes' -Label 'test').Safe) 'DOS 8.3 target spelling rejected before upstream path expansion'
     Assert-True (Test-HermesSafeTargetPath -LiteralPath (Join-Path $testRootFull 'home') -Label 'test').Safe 'nested target accepted'
+
+    $shortDefaultPathRejected = $false
+    try {
+        Get-HermesDefaultPaths -HermesHome 'C:\Users\FIRSTL~1\AppData\Local\hermes' -RuntimeRoot (Join-Path $testRootFull 'short-path-runtime') | Out-Null
+    } catch {
+        $shortDefaultPathRejected = ([int]$_.Exception.Data['ExitCode'] -eq 10)
+    }
+    Assert-True $shortDefaultPathRejected 'default path normalization rejects raw DOS 8.3 spelling with preflight exit code'
 
     $planA = New-HermesInstallPlan -HermesHome (Join-Path $testRootFull 'home') -RuntimeRoot (Join-Path $testRootFull 'runtime')
     $planB = New-HermesInstallPlan -HermesHome (Join-Path $testRootFull 'home') -RuntimeRoot (Join-Path $testRootFull 'runtime')
     $planC = New-HermesInstallPlan -HermesHome (Join-Path $testRootFull 'home') -RuntimeRoot (Join-Path $testRootFull 'runtime') -IncludeDesktop
+    $trailingPaths = Get-HermesDefaultPaths -HermesHome ($planA.HermesHome + '\') -InstallDir ($planA.InstallDir + '\') -RuntimeRoot ($planA.RuntimeRoot + '\')
+    $rootPaths = Get-HermesDefaultPaths -HermesHome 'C:\' -InstallDir 'C:\' -RuntimeRoot 'C:\'
+    Assert-True ($trailingPaths.HermesHome -ceq $planA.HermesHome -and $trailingPaths.InstallDir -ceq $planA.InstallDir -and $trailingPaths.RuntimeRoot -ceq $planA.RuntimeRoot -and $rootPaths.HermesHome -ceq 'C:\') 'directory paths remove trailing separators without corrupting drive roots'
     Assert-Equal $planA.Fingerprint $planB.Fingerprint 'plan fingerprint deterministic'
     Assert-True ($planA.Fingerprint -ne $planC.Fingerprint) 'material option changes fingerprint'
 
@@ -67,6 +100,83 @@ try {
     Assert-True ($null -ne $installEngineModule) 'InstallEngine module context is available for private resolver tests'
     $signedManagedCandidate = & $installEngineModule { param($path) Test-HermesGitCandidate -LiteralPath $path -RequireValidSignature } $planManagedGit
     Assert-Equal ([System.IO.Path]::GetFullPath($planManagedGit)) $signedManagedCandidate 'signed Git candidate passes leaf validation'
+
+    $trustedRegistryGitDirectory = [System.IO.Path]::GetDirectoryName($signedSystemGit)
+    $hostileRegistryGitDirectory = Join-Path $testRootFull 'hostile-registry-git'
+    New-Item -ItemType Directory -Path $hostileRegistryGitDirectory -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $hostileRegistryGitDirectory 'git.cmd'), '@exit /b 97', (New-Object System.Text.ASCIIEncoding))
+    $safeRegistryGit = & $installEngineModule {
+        param($trusted, $directory)
+        Test-HermesRegistryGitResolution -TrustedGitPath $trusted -PathValues @($directory)
+    } $signedSystemGit $trustedRegistryGitDirectory
+    $hostileRegistryGit = & $installEngineModule {
+        param($trusted, $hostile, $trustedDirectory)
+        Test-HermesRegistryGitResolution -TrustedGitPath $trusted -PathValues @($hostile, $trustedDirectory)
+    } $signedSystemGit $hostileRegistryGitDirectory $trustedRegistryGitDirectory
+    $laterHostileRegistryGit = & $installEngineModule {
+        param($trusted, $trustedDirectory, $hostile)
+        Test-HermesRegistryGitResolution -TrustedGitPath $trusted -PathValues @($trustedDirectory, $hostile)
+    } $signedSystemGit $trustedRegistryGitDirectory $hostileRegistryGitDirectory
+    Assert-True ($safeRegistryGit.Valid -and -not $hostileRegistryGit.Valid -and $laterHostileRegistryGit.Valid) 'registry PATH requires signed Program Files Git as the first git command'
+
+    $commandShadowMarker = Join-Path $testRootFull 'command-shadow-executed.marker'
+    $commandShadowCases = @(
+        [pscustomobject]@{ Stage = 'uv'; File = 'uv.cmd' },
+        [pscustomobject]@{ Stage = 'python'; File = 'python.exe' },
+        [pscustomobject]@{ Stage = 'node'; File = 'node.ps1' },
+        [pscustomobject]@{ Stage = 'system-packages'; File = 'rg.exe' },
+        [pscustomobject]@{ Stage = 'system-packages'; File = 'ffmpeg.exe' },
+        [pscustomobject]@{ Stage = 'system-packages'; File = 'winget.cmd' },
+        [pscustomobject]@{ Stage = 'system-packages'; File = 'choco.cmd' },
+        [pscustomobject]@{ Stage = 'system-packages'; File = 'scoop.ps1' },
+        [pscustomobject]@{ Stage = 'venv'; File = 'taskkill.cmd' },
+        [pscustomobject]@{ Stage = 'dependencies'; File = 'npm.ps1' },
+        [pscustomobject]@{ Stage = 'dependencies'; File = 'npx.ps1' },
+        [pscustomobject]@{ Stage = 'dependencies'; File = 'cua-driver.cmd' },
+        [pscustomobject]@{ Stage = 'node-deps'; File = 'uv.ps1' },
+        [pscustomobject]@{ Stage = 'repository'; File = 'ssh.cmd' },
+        [pscustomobject]@{ Stage = 'desktop'; File = 'uv.ps1' },
+        [pscustomobject]@{ Stage = 'desktop'; File = 'icacls.cmd' },
+        [pscustomobject]@{ Stage = 'desktop'; File = 'ie4uinit.cmd' }
+    )
+    $commandShadowResults = @()
+    for ($shadowIndex = 0; $shadowIndex -lt $commandShadowCases.Count; $shadowIndex++) {
+        $shadowCase = $commandShadowCases[$shadowIndex]
+        $shadowDirectory = Join-Path $testRootFull ("command-shadow-$shadowIndex")
+        New-Item -ItemType Directory -Path $shadowDirectory -Force | Out-Null
+        $shadowPath = Join-Path $shadowDirectory ([string]$shadowCase.File)
+        $shadowText = "Set-Content -LiteralPath '$commandShadowMarker' -Value hostile"
+        [System.IO.File]::WriteAllText($shadowPath, $shadowText, (New-Object System.Text.UTF8Encoding($false)))
+        $shadowResult = & $installEngineModule {
+            param($plan, $stage, $trustedGit, $shadow, $trustedDirectory)
+            Test-HermesStageBareCommandResolution -Plan $plan -Stage $stage -TrustedGitPath $trustedGit -PathValues @($shadow, $trustedDirectory) -ManagedCommandProof @{}
+        } $planA ([string]$shadowCase.Stage) $signedSystemGit $shadowDirectory $trustedRegistryGitDirectory
+        $commandShadowResults += $shadowResult
+    }
+    Assert-True (@($commandShadowResults | Where-Object { [bool]$_.Valid }).Count -eq 0 -and -not (Test-Path -LiteralPath $commandShadowMarker)) 'reviewed stages reject hostile exe, cmd, and ps1 PATH candidates without execution'
+    $optionalCommandsAbsent = & $installEngineModule {
+        param($plan, $trustedGit, $trustedDirectory)
+        Test-HermesStageBareCommandResolution -Plan $plan -Stage 'system-packages' -TrustedGitPath $trustedGit -PathValues @($trustedDirectory) -ManagedCommandProof @{}
+    } $planA $signedSystemGit $trustedRegistryGitDirectory
+    $unreviewedStage = & $installEngineModule {
+        param($plan, $trustedGit, $trustedDirectory)
+        Test-HermesStageBareCommandResolution -Plan $plan -Stage 'future-stage' -TrustedGitPath $trustedGit -PathValues @($trustedDirectory) -ManagedCommandProof @{}
+    } $planA $signedSystemGit $trustedRegistryGitDirectory
+    Assert-True ($optionalCommandsAbsent.Valid -and $optionalCommandsAbsent.MissingCommands -contains 'rg' -and $optionalCommandsAbsent.MissingCommands -contains 'ffmpeg' -and -not $unreviewedStage.Valid) 'optional absent commands are reported and unreviewed stages fail closed'
+
+    $nullRegistryPathResult = & $installEngineModule {
+        Get-HermesRegistryBareCommandCandidates -CommandName 'uv' -PathValues $null
+    }
+    $invalidRegistryPathValues = @(';', 'relative\bin', '\\server\share\bin', '%HERMES_EASY_SETUP_UNDEFINED_PATH%')
+    $invalidRegistryPathResults = @($nullRegistryPathResult) + @($invalidRegistryPathValues | ForEach-Object {
+        & $installEngineModule {
+            param($value)
+            Get-HermesRegistryBareCommandCandidates -CommandName 'uv' -PathValues @($value)
+        } $_
+    })
+    $driveRootComparable = & $installEngineModule { ConvertTo-HermesComparablePathEntry -PathEntry 'C:\' }
+    Assert-True (@($invalidRegistryPathResults | Where-Object { [bool]$_.Valid }).Count -eq 0 -and $driveRootComparable -ceq 'C:\') 'registry PATH rejects null, empty, relative, UNC, and unexpanded entries while preserving drive roots'
+
     New-Item -ItemType Directory -Path $planA.RuntimeRoot -Force | Out-Null
 
     $callerGitConfig = Join-Path $testRootFull 'caller.gitconfig'
@@ -79,14 +189,17 @@ try {
         $gitConfigPath = [string]$repositoryEnvironment['GIT_CONFIG_GLOBAL']
         $token = [System.IO.Path]::GetFileName($gitConfigPath).Substring(11, 32)
         $gitAttributesPath = Join-Path $planA.RuntimeRoot ("git-attributes-$token.txt")
+        $gitExcludesPath = Join-Path $planA.RuntimeRoot ("git-excludes-$token.txt")
         $attributesConfigValue = ([System.IO.Path]::GetFullPath($gitAttributesPath)).Replace('\', '/').Replace('"', '\"')
-        $gitConfigText = "[core]`n`tautocrlf = false`n`tattributesFile = `"$attributesConfigValue`"`n"
+        $excludesConfigValue = ([System.IO.Path]::GetFullPath($gitExcludesPath)).Replace('\', '/').Replace('"', '\"')
+        $gitConfigText = "[core]`n`tautocrlf = false`n`tattributesFile = `"$attributesConfigValue`"`n`texcludesFile = `"$excludesConfigValue`"`n`thooksPath = NUL`n`tfsmonitor = false`n"
         Assert-Equal $planA.HermesHome $repositoryEnvironment['HERMES_HOME'] 'stage environment preserves HERMES_HOME'
         Assert-True ($repositoryEnvironment.ContainsKey('GIT_CONFIG_GLOBAL')) 'fresh repository stage receives managed global Git config'
         Assert-True ($gitConfigPath.StartsWith(([System.IO.Path]::GetFullPath($planA.RuntimeRoot).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) 'managed Git config stays inside RuntimeRoot'
         Assert-True ((Split-Path -Leaf $gitConfigPath) -match '^git-global-[0-9a-f]{32}\.config$') 'managed Git config uses an unpredictable filename'
         Assert-Equal $gitConfigText ([System.IO.File]::ReadAllText($gitConfigPath, [System.Text.Encoding]::UTF8)) 'managed Git config forces LF and empty global attributes'
         Assert-Equal 0 (Get-Item -LiteralPath $gitAttributesPath).Length 'managed global attributes file is empty'
+        Assert-Equal 0 (Get-Item -LiteralPath $gitExcludesPath).Length 'managed external excludes file is empty'
         $coreRead = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('config', '--file', $gitConfigPath, '--bool', '--get', 'core.autocrlf') -Environment $repositoryEnvironment -TimeoutSeconds 30
         Assert-Equal 0 $coreRead.ExitCode 'managed Git config is accepted by Git'
         Assert-Equal 'false' $coreRead.StdOut.Trim() 'Git reads managed core.autocrlf as false'
@@ -96,6 +209,8 @@ try {
         Assert-Equal 'false' $coreAfterWrite.StdOut.Trim() 'upstream global write preserves managed core.autocrlf'
         $attributesAfterWrite = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('config', '--file', $gitConfigPath, '--path', '--get', 'core.attributesFile') -Environment $repositoryEnvironment -TimeoutSeconds 30
         Assert-Equal ([System.IO.Path]::GetFullPath($gitAttributesPath)) ([System.IO.Path]::GetFullPath($attributesAfterWrite.StdOut.Trim())) 'upstream global write preserves managed attributes file'
+        $excludesAfterWrite = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('config', '--file', $gitConfigPath, '--path', '--get', 'core.excludesFile') -Environment $repositoryEnvironment -TimeoutSeconds 30
+        Assert-Equal ([System.IO.Path]::GetFullPath($gitExcludesPath)) ([System.IO.Path]::GetFullPath($excludesAfterWrite.StdOut.Trim())) 'upstream global write preserves empty external excludes file'
         $gitConfigBytes = [System.IO.File]::ReadAllBytes($gitConfigPath)
         Assert-True (-not ($gitConfigBytes[0] -eq 0xEF -and $gitConfigBytes[1] -eq 0xBB -and $gitConfigBytes[2] -eq 0xBF)) 'managed Git config has no UTF-8 BOM'
 
@@ -108,31 +223,490 @@ try {
         Assert-True ($repositoryEnvironmentAgain.ContainsKey('GIT_EXEC_PATH') -and $null -eq $repositoryEnvironmentAgain['GIT_EXEC_PATH']) 'ambient Git executable redirect is removed'
         Assert-True ($repositoryEnvironmentAgain.ContainsKey('GIT_COMMON_DIR') -and $null -eq $repositoryEnvironmentAgain['GIT_COMMON_DIR']) 'ambient Git common directory redirect is removed'
         Assert-True ($repositoryEnvironmentAgain.ContainsKey('GIT_NAMESPACE') -and $null -eq $repositoryEnvironmentAgain['GIT_NAMESPACE']) 'ambient Git namespace redirect is removed'
-        Assert-Equal '0' $repositoryEnvironmentAgain['GIT_CONFIG_NOSYSTEM'] 'default Git system configuration remains enabled'
+        Assert-Equal '1' $repositoryEnvironmentAgain['GIT_CONFIG_NOSYSTEM'] 'Git system configuration is disabled for every stage'
         Assert-Equal '1' $repositoryEnvironmentAgain['GIT_ATTR_NOSYSTEM'] 'system Git attributes are disabled'
+        Assert-Equal '1' $repositoryEnvironmentAgain['GIT_NO_REPLACE_OBJECTS'] 'Git replace objects are disabled'
+        Assert-Equal '2' $repositoryEnvironmentAgain['GIT_CONFIG_COUNT'] 'two safe Git command overrides are installed'
+        Assert-Equal 'core.hooksPath' $repositoryEnvironmentAgain['GIT_CONFIG_KEY_0'] 'Git hooks override key is fixed'
+        Assert-Equal 'NUL' $repositoryEnvironmentAgain['GIT_CONFIG_VALUE_0'] 'Git hooks are disabled'
+        Assert-Equal 'core.fsmonitor' $repositoryEnvironmentAgain['GIT_CONFIG_KEY_1'] 'Git fsmonitor override key is fixed'
+        Assert-Equal 'false' $repositoryEnvironmentAgain['GIT_CONFIG_VALUE_1'] 'Git fsmonitor is disabled'
+        Assert-Equal '.COM;.EXE;.BAT;.CMD' $repositoryEnvironmentAgain['PATHEXT'] 'stage command extensions are fixed'
+        $expectedSystemModulePath = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)) 'System32\WindowsPowerShell\v1.0\Modules'
+        Assert-Equal ([System.IO.Path]::GetFullPath($expectedSystemModulePath)) $repositoryEnvironmentAgain['PSModulePath'] 'stage PowerShell module path is system-only'
+        $expectedWindowsDirectory = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
+        $expectedCmdPath = Join-Path $expectedWindowsDirectory 'System32\cmd.exe'
+        $expectedGitSshPath = Join-Path (Split-Path -Parent (Split-Path -Parent $signedSystemGit)) 'usr\bin\ssh.exe'
+        Assert-True ([string]::Equals([string]$repositoryEnvironmentAgain['ComSpec'], [System.IO.Path]::GetFullPath($expectedCmdPath), [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([string]$repositoryEnvironmentAgain['SystemRoot'], $expectedWindowsDirectory, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([string]$repositoryEnvironmentAgain['WINDIR'], $expectedWindowsDirectory, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([string]$repositoryEnvironmentAgain['GIT_SSH'], [System.IO.Path]::GetFullPath($expectedGitSshPath), [StringComparison]::OrdinalIgnoreCase)) 'stage environment pins cmd, Windows roots, and bundled Git SSH'
+        $trustedWindowsCommandPaths = & $installEngineModule {
+            @('cmd', 'schtasks', 'taskkill', 'icacls', 'ie4uinit') | ForEach-Object {
+                Get-HermesTrustedWindowsCommandPath -CommandName $_
+            }
+        }
+        Assert-True (@($trustedWindowsCommandPaths).Count -eq 5 -and @($trustedWindowsCommandPaths | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }).Count -eq 0) 'signed System32 command canaries pass trust validation'
+        $appExecutionAliasChecks = & $installEngineModule {
+            $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+            @('winget.exe', 'python.exe') | ForEach-Object {
+                $path = Join-Path $localAppData (Join-Path 'Microsoft\WindowsApps' $_)
+                [pscustomobject]@{
+                    Name = $_
+                    Exists = (Test-Path -LiteralPath $path -PathType Leaf)
+                    Trusted = $(if (Test-Path -LiteralPath $path -PathType Leaf) { Test-HermesWindowsAppExecutionAlias -LiteralPath $path -ExpectedName $_ } else { $true })
+                }
+            }
+        }
+        Assert-True (@($appExecutionAliasChecks | Where-Object { [bool]$_.Exists -and -not [bool]$_.Trusted }).Count -eq 0) 'present winget and Python AppExecLink aliases are package-bound'
+        $vbsOnlyGitDirectory = Join-Path $testRootFull 'vbs-only-registry-git'
+        New-Item -ItemType Directory -Path $vbsOnlyGitDirectory -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $vbsOnlyGitDirectory 'git.vbs'), 'WScript.Echo "hostile"', (New-Object System.Text.ASCIIEncoding))
+        $vbsProbeEnvironment = @{}
+        foreach ($environmentKey in $repositoryEnvironmentAgain.Keys) { $vbsProbeEnvironment[$environmentKey] = $repositoryEnvironmentAgain[$environmentKey] }
+        $vbsProbeEnvironment['PATH'] = $vbsOnlyGitDirectory + [System.IO.Path]::PathSeparator + $trustedRegistryGitDirectory
+        $vbsProbeCommand = '$command = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1; [Console]::Out.WriteLine($command.Source)'
+        $vbsProbeResult = Invoke-HermesProcess -FilePath (Get-HermesPowerShellExecutable) -ArgumentList @('-NoLogo', '-NoProfile', '-Command', $vbsProbeCommand) -Environment $vbsProbeEnvironment -TimeoutSeconds 30
+        Assert-True ($vbsProbeResult.ExitCode -eq 0 -and [string]::Equals($vbsProbeResult.StdOut.Trim(), $signedSystemGit, [System.StringComparison]::OrdinalIgnoreCase)) 'fixed PATHEXT prevents a registry PATH git.vbs from shadowing trusted Git'
 
         Remove-HermesStageEnvironmentArtifacts -Environment $repositoryEnvironment -Plan $planA
         Remove-HermesStageEnvironmentArtifacts -Environment $repositoryEnvironmentAgain -Plan $planA
         Assert-True (-not (Test-Path -LiteralPath $gitConfigPath)) 'first managed Git config is removed after stage'
         Assert-True (-not (Test-Path -LiteralPath $gitConfigPathAgain)) 'second managed Git config is removed after stage'
         Assert-True (-not (Test-Path -LiteralPath $gitAttributesPath)) 'managed Git attributes are removed after stage'
+        Assert-True (-not (Test-Path -LiteralPath $gitExcludesPath)) 'managed Git excludes are removed after stage'
     } finally {
         [Environment]::SetEnvironmentVariable('GIT_CONFIG_GLOBAL', $previousGlobalConfig, [EnvironmentVariableTarget]::Process)
     }
 
     $existingRepositoryEnvironment = New-HermesStageEnvironment -Plan $planA -Stage 'repository' -ExistingCheckout
-    Assert-True ($existingRepositoryEnvironment.ContainsKey('GIT_CONFIG_GLOBAL') -and $null -eq $existingRepositoryEnvironment['GIT_CONFIG_GLOBAL']) 'existing checkout does not receive fresh clone config'
+    $existingGitConfigPath = [string]$existingRepositoryEnvironment['GIT_CONFIG_GLOBAL']
+    Assert-True (-not [string]::IsNullOrWhiteSpace($existingGitConfigPath)) 'existing checkout receives isolated managed Git config'
+    Assert-Equal '1' $existingRepositoryEnvironment['GIT_CONFIG_NOSYSTEM'] 'existing checkout disables system Git config'
     Assert-True ($existingRepositoryEnvironment.ContainsKey('GIT_COMMON_DIR') -and $null -eq $existingRepositoryEnvironment['GIT_COMMON_DIR']) 'existing checkout removes ambient common directory'
     $trustedGitPathPrefix = [System.IO.Path]::GetDirectoryName($signedSystemGit) + [System.IO.Path]::PathSeparator
     Assert-True ([string]$existingRepositoryEnvironment['PATH'] -like "$trustedGitPathPrefix*") 'repository stage PATH starts with Program Files Git'
+    Remove-HermesStageEnvironmentArtifacts -Environment $existingRepositoryEnvironment -Plan $planA
+    Assert-True (-not (Test-Path -LiteralPath $existingGitConfigPath)) 'existing checkout managed Git config is removed'
     $gitStageEnvironment = New-HermesStageEnvironment -Plan $planA -Stage 'git'
     Assert-True ([string]$gitStageEnvironment['PATH'] -like "$trustedGitPathPrefix*") 'official Git stage PATH starts with Program Files Git'
-    Assert-True ($gitStageEnvironment.ContainsKey('GIT_CONFIG_GLOBAL') -and $null -eq $gitStageEnvironment['GIT_CONFIG_GLOBAL']) 'official Git stage removes ambient global config'
+    Assert-True ($gitStageEnvironment.ContainsKey('GIT_CONFIG_GLOBAL') -and (Test-Path -LiteralPath ([string]$gitStageEnvironment['GIT_CONFIG_GLOBAL']) -PathType Leaf)) 'official Git stage receives managed global config'
     $uvEnvironment = New-HermesStageEnvironment -Plan $planA -Stage 'uv'
     Assert-True ([string]$uvEnvironment['PATH'] -like "$trustedGitPathPrefix*") 'later automatic stage PATH starts with Program Files Git'
-    Assert-True ($uvEnvironment.ContainsKey('GIT_CONFIG_GLOBAL') -and $null -eq $uvEnvironment['GIT_CONFIG_GLOBAL']) 'later automatic stage removes ambient global config'
+    Assert-True ($uvEnvironment.ContainsKey('GIT_CONFIG_GLOBAL') -and (Test-Path -LiteralPath ([string]$uvEnvironment['GIT_CONFIG_GLOBAL']) -PathType Leaf)) 'later automatic stage receives managed global config'
     Assert-True ($uvEnvironment.ContainsKey('GIT_COMMON_DIR') -and $null -eq $uvEnvironment['GIT_COMMON_DIR']) 'later automatic stage removes ambient common directory'
+    $stageProfilePrefix = [System.IO.Path]::GetFullPath($planA.RuntimeRoot).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar + 'stage-profile-'
+    Assert-True ([string]$uvEnvironment['USERPROFILE'] -like "$stageProfilePrefix*" -and
+        [string]::Equals([string]$uvEnvironment['HOME'], [string]$uvEnvironment['USERPROFILE'], [StringComparison]::OrdinalIgnoreCase) -and
+        [string]$uvEnvironment['LOCALAPPDATA'] -like "$stageProfilePrefix*" -and
+        [string]$uvEnvironment['TEMP'] -like "$stageProfilePrefix*" -and
+        (Get-Item -LiteralPath ([string]$uvEnvironment['NPM_CONFIG_USERCONFIG'])).Length -eq 0) 'automatic stage uses an isolated profile, TEMP, LocalAppData, and empty npm config'
+    Assert-True ([string]$uvEnvironment['UV_NO_MODIFY_PATH'] -ceq '1' -and [string]$uvEnvironment['UV_MANAGED_PYTHON'] -ceq '1' -and [string]$uvEnvironment['UV_PYTHON_NO_REGISTRY'] -ceq '1' -and
+        [string]$uvEnvironment['UV_TOOL_DIR'] -ceq [System.IO.Path]::GetFullPath((Join-Path $planA.HermesHome 'uv-tools')) -and
+        [string]$uvEnvironment['UV_TOOL_BIN_DIR'] -ceq [System.IO.Path]::GetFullPath((Join-Path $planA.HermesHome 'bin')) -and
+        [string]$uvEnvironment['PLAYWRIGHT_BROWSERS_PATH'] -ceq '0') 'uv cannot modify User PATH or discover registry Python, while tool and browser environments remain in stable managed locations'
+    $hostileEnvironmentNames = @('NODE_OPTIONS', 'NODE_PATH', 'PYTHONPATH', 'PYTHONHOME', 'BASH_ENV', 'ENV', 'NPM_CONFIG_SCRIPT_SHELL', 'GIT_SSH_COMMAND')
+    $hostileEnvironmentPrevious = @{}
+    try {
+        foreach ($name in $hostileEnvironmentNames) {
+            $hostileEnvironmentPrevious[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable($name, (Join-Path $testRootFull ("hostile-$name")), [EnvironmentVariableTarget]::Process)
+        }
+        $isolationProbeCommand = '$names=@("NODE_OPTIONS","NODE_PATH","PYTHONPATH","PYTHONHOME","BASH_ENV","ENV","NPM_CONFIG_SCRIPT_SHELL");if(@($names|Where-Object{Test-Path "Env:$_"}).Count -eq 0 -and $env:GIT_SSH_COMMAND -eq $null){[Console]::Out.WriteLine("isolated")}else{[Console]::Out.WriteLine("inherited")}'
+        $isolationProbe = Invoke-HermesProcess -FilePath (Get-HermesPowerShellExecutable) -ArgumentList @('-NoLogo', '-NoProfile', '-Command', $isolationProbeCommand) -Environment $uvEnvironment -TimeoutSeconds 30
+        Assert-True ($isolationProbe.ExitCode -eq 0 -and $isolationProbe.StdOut.Trim() -ceq 'isolated') 'replacement environment blocks inherited Node, Python, shell, npm, and Git injection variables'
+    } finally {
+        foreach ($name in $hostileEnvironmentNames) {
+            [Environment]::SetEnvironmentVariable($name, $hostileEnvironmentPrevious[$name], [EnvironmentVariableTarget]::Process)
+        }
+    }
     Assert-Equal ([System.IO.Path]::GetFullPath($signedSystemGit)) (Get-HermesVerificationGitPath -HermesHome $planA.HermesHome) 'Program Files Git is selected'
+    $gitStageConfigPath = [string]$gitStageEnvironment['GIT_CONFIG_GLOBAL']
+    $uvStageConfigPath = [string]$uvEnvironment['GIT_CONFIG_GLOBAL']
+    $gitStageProfilePath = [string]$gitStageEnvironment['HERMES_EASY_SETUP_STAGE_PROFILE']
+    $uvStageProfilePath = [string]$uvEnvironment['HERMES_EASY_SETUP_STAGE_PROFILE']
+    Remove-HermesStageEnvironmentArtifacts -Environment $gitStageEnvironment -Plan $planA
+    Remove-HermesStageEnvironmentArtifacts -Environment $uvEnvironment -Plan $planA
+    Assert-True (-not (Test-Path -LiteralPath $gitStageConfigPath) -and -not (Test-Path -LiteralPath $uvStageConfigPath) -and -not (Test-Path -LiteralPath $gitStageProfilePath) -and -not (Test-Path -LiteralPath $uvStageProfilePath)) 'automatic stage Git files and isolated profiles are removed'
+
+    $freshGuardHome = Join-Path $testRootFull 'fresh-command-guard-home'
+    $freshGuardRuntime = Join-Path $testRootFull 'fresh-command-guard-runtime'
+    $freshGuardPlan = New-HermesInstallPlan -HermesHome $freshGuardHome -RuntimeRoot $freshGuardRuntime
+    $freshPreplantPaths = @(
+        (Join-Path $freshGuardHome 'bin\uv.exe'),
+        (Join-Path $freshGuardHome 'bin\browser-use.exe'),
+        (Join-Path $freshGuardHome 'node\node.exe'),
+        (Join-Path $freshGuardHome 'node\npm.cmd'),
+        (Join-Path $freshGuardHome 'node\npm.ps1'),
+        (Join-Path $freshGuardHome 'node\npx.cmd'),
+        (Join-Path $freshGuardHome 'node\npx.ps1'),
+        (Join-Path $freshGuardHome 'python'),
+        (Join-Path $freshGuardHome 'uv-tools'),
+        (Join-Path $freshGuardHome 'git\bin\bash.exe'),
+        (Join-Path $freshGuardHome 'git\usr\bin\bash.exe')
+    )
+    $freshPreplantRejected = 0
+    foreach ($preplantPath in $freshPreplantPaths) {
+        if ((Split-Path -Leaf $preplantPath) -eq 'python') {
+            New-Item -ItemType Directory -Path $preplantPath -Force | Out-Null
+        } else {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $preplantPath) -Force | Out-Null
+            [System.IO.File]::WriteAllText($preplantPath, 'preplanted', (New-Object System.Text.UTF8Encoding($false)))
+        }
+        try {
+            & $installEngineModule {
+                param($plan, $path)
+                Assert-HermesFreshManagedCommandSeed -Plan $plan -PathValues @($path)
+            } $freshGuardPlan $trustedRegistryGitDirectory
+        } catch {
+            $freshPreplantRejected++
+        } finally {
+            if (Test-Path -LiteralPath $preplantPath -PathType Container) {
+                Remove-Item -LiteralPath $preplantPath -Recurse -Force
+            } elseif (Test-Path -LiteralPath $preplantPath) {
+                Remove-Item -LiteralPath $preplantPath -Force
+            }
+        }
+    }
+    Assert-Equal $freshPreplantPaths.Count $freshPreplantRejected 'fresh install rejects every exact managed command, browser backend, and Python preplant'
+    $ambientCuaDirectory = Join-Path $testRootFull 'ambient-cua-driver'
+    New-Item -ItemType Directory -Path $ambientCuaDirectory -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $ambientCuaDirectory 'cua-driver.cmd'), '@exit /b 0', (New-Object System.Text.ASCIIEncoding))
+    $ambientCuaRejected = $false
+    try {
+        & $installEngineModule {
+            param($plan, $path)
+            Assert-HermesFreshManagedCommandSeed -Plan $plan -PathValues @($path)
+        } $freshGuardPlan $ambientCuaDirectory
+    } catch { $ambientCuaRejected = $true }
+    $skipCuaPlan = New-HermesInstallPlan -HermesHome $freshGuardHome -RuntimeRoot $freshGuardRuntime -SkipComputerUse
+    $skipCuaAccepted = $true
+    try {
+        & $installEngineModule {
+            param($plan, $path)
+            Assert-HermesFreshManagedCommandSeed -Plan $plan -PathValues @($path)
+        } $skipCuaPlan $ambientCuaDirectory
+    } catch { $skipCuaAccepted = $false }
+    Assert-True ($ambientCuaRejected -and $skipCuaAccepted) 'fresh install rejects ambient cua-driver unless computer use is skipped'
+
+    $launcherHome = Join-Path $testRootFull 'launcher-home'
+    $launcherRepo = Join-Path $launcherHome 'hermes-agent'
+    $launcherRuntime = Join-Path $testRootFull 'launcher-runtime'
+    New-Item -ItemType Directory -Path $launcherRepo -Force | Out-Null
+    New-Item -ItemType Directory -Path $launcherRuntime -Force | Out-Null
+    $launcherPlan = [pscustomobject]@{ HermesHome = $launcherHome; InstallDir = $launcherRepo; RuntimeRoot = $launcherRuntime }
+    $freshSeed = & $installEngineModule { param($path) Get-HermesFreshCheckoutSeed -InstallDir $path } $launcherRepo
+    Assert-True ([bool]$freshSeed.Eligible) 'empty ordinary InstallDir is eligible for fresh proof'
+    $launcherEnvironment = New-HermesStageEnvironment -Plan $launcherPlan -Stage 'repository'
+    try {
+        $launcherInit = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('init', $launcherRepo) -Environment $launcherEnvironment -TimeoutSeconds 30
+        [System.IO.File]::WriteAllText((Join-Path $launcherRepo '.gitignore'), "/venv/`n", (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText((Join-Path $launcherRepo 'tracked.txt'), "pinned`n", (New-Object System.Text.UTF8Encoding($false)))
+        $launcherAdd = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'add', '--', '.gitignore', 'tracked.txt') -Environment $launcherEnvironment -TimeoutSeconds 30
+        $launcherCommit = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-c', 'user.name=Hermes Test', '-c', 'user.email=hermes-test@example.invalid', '-C', $launcherRepo, 'commit', '-m', 'fixture') -Environment $launcherEnvironment -TimeoutSeconds 30
+        $launcherRemote = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'remote', 'add', 'origin', 'https://github.com/NousResearch/hermes-agent.git') -Environment $launcherEnvironment -TimeoutSeconds 30
+        $launcherWindowsConfig = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'config', '--local', 'windows.appendAtomically', 'false') -Environment $launcherEnvironment -TimeoutSeconds 30
+        Assert-True ($launcherInit.ExitCode -eq 0 -and $launcherAdd.ExitCode -eq 0 -and $launcherCommit.ExitCode -eq 0 -and $launcherRemote.ExitCode -eq 0 -and $launcherWindowsConfig.ExitCode -eq 0) 'managed launcher Git fixture created with pinned installer config'
+
+        $launcherHeadResult = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'rev-parse', 'HEAD') -Environment $launcherEnvironment -TimeoutSeconds 30
+        $launcherHead = $launcherHeadResult.StdOut.Trim()
+        $freshProof = & $installEngineModule { param($seed, $plan, $commit) New-HermesFreshRepositoryProof -Seed $seed -Plan $plan -ExpectedCommit $commit } $freshSeed $launcherPlan $launcherHead
+        Assert-True ([string]$freshProof.ExpectedCommit -eq $launcherHead.ToLowerInvariant()) 'clean repository receives a same-run fresh proof'
+        $nonEmptySeed = & $installEngineModule { param($path) Get-HermesFreshCheckoutSeed -InstallDir $path } $launcherRepo
+        Assert-True (-not [bool]$nonEmptySeed.Eligible) 'nonempty checkout cannot mint a new fresh seed'
+
+        $proofDirtyPath = Join-Path $launcherRepo 'proof-dirty.tmp'
+        [System.IO.File]::WriteAllText($proofDirtyPath, 'dirty', (New-Object System.Text.UTF8Encoding($false)))
+        $dirtyProofRejected = $false
+        try { & $installEngineModule { param($seed, $plan, $commit) New-HermesFreshRepositoryProof -Seed $seed -Plan $plan -ExpectedCommit $commit } $freshSeed $launcherPlan $launcherHead | Out-Null } catch { $dirtyProofRejected = $true }
+        Remove-Item -LiteralPath $proofDirtyPath -Force
+        Assert-True $dirtyProofRejected 'fresh proof rejects an untracked repository change'
+
+        $launcherExcludePath = Join-Path $launcherRepo '.git\info\exclude'
+        $excludeStateBeforeRace = & $installEngineModule { param($path) Get-HermesManagedLauncherExcludeState -InstallDir $path } $launcherRepo
+        $excludeBytesBeforeRace = [byte[]]$excludeStateBeforeRace.OriginalBytes
+        $concurrentText = ([string]$excludeStateBeforeRace.Text) + "# concurrent user comment`n"
+        $concurrentBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($concurrentText)
+        [System.IO.File]::WriteAllBytes($launcherExcludePath, $concurrentBytes)
+        $concurrentWriteRejected = $false
+        try {
+            & $installEngineModule {
+                param($state)
+                Set-HermesManagedLauncherExcludeFile -State $state -MissingPatterns @('/bin/hermes.exe', '/bin/hermes-acp.exe')
+            } $excludeStateBeforeRace | Out-Null
+        } catch { $concurrentWriteRejected = $true }
+        $concurrentBytesAfter = [System.IO.File]::ReadAllBytes($launcherExcludePath)
+        Assert-True ($concurrentWriteRejected -and [Convert]::ToBase64String($concurrentBytesAfter) -ceq [Convert]::ToBase64String($concurrentBytes)) 'concurrent exclude edit is preserved and managed write is rejected'
+        [System.IO.File]::WriteAllBytes($launcherExcludePath, $excludeBytesBeforeRace)
+
+        $launcherSources = Join-Path $launcherRepo 'venv\Scripts'
+        $launcherTargets = Join-Path $launcherRepo 'bin'
+        New-Item -ItemType Directory -Path $launcherSources -Force | Out-Null
+        New-Item -ItemType Directory -Path $launcherTargets -Force | Out-Null
+        foreach ($name in @('hermes.exe', 'hermes-acp.exe')) {
+            [byte[]]$bytes = New-TestPortableExecutableBytes -Seed "managed launcher $name"
+            [System.IO.File]::WriteAllBytes((Join-Path $launcherSources $name), $bytes)
+            [System.IO.File]::WriteAllBytes((Join-Path $launcherTargets $name), $bytes)
+        }
+
+        $validPeFixture = Join-Path $launcherRuntime 'valid-pe.exe'
+        [System.IO.File]::WriteAllBytes($validPeFixture, [byte[]](New-TestPortableExecutableBytes -Seed 'valid direct PE fixture'))
+        [byte[]]$mzOnlyBytes = New-Object byte[] 128
+        $mzOnlyBytes[0] = 0x4D
+        $mzOnlyBytes[1] = 0x5A
+        $mzOnlyFixture = Join-Path $launcherRuntime 'mz-only.exe'
+        [System.IO.File]::WriteAllBytes($mzOnlyFixture, $mzOnlyBytes)
+        [byte[]]$badSignatureBytes = New-TestPortableExecutableBytes -Seed 'bad PE signature'
+        $badSignatureBytes[0x80] = 0x51
+        $badSignatureFixture = Join-Path $launcherRuntime 'bad-signature.exe'
+        [System.IO.File]::WriteAllBytes($badSignatureFixture, $badSignatureBytes)
+        $validPeHeader = & $installEngineModule { param($path) Test-HermesPortableExecutableHeader -LiteralPath $path } $validPeFixture
+        $mzOnlyHeader = & $installEngineModule { param($path) Test-HermesPortableExecutableHeader -LiteralPath $path } $mzOnlyFixture
+        $badSignatureHeader = & $installEngineModule { param($path) Test-HermesPortableExecutableHeader -LiteralPath $path } $badSignatureFixture
+        Assert-True ($validPeHeader -and -not $mzOnlyHeader -and -not $badSignatureHeader) 'PE parser requires bounded e_lfanew and PE signature'
+
+        $managedUvPath = Join-Path $launcherHome 'bin\uv.exe'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $managedUvPath) -Force | Out-Null
+        [byte[]]$managedUvBytes = New-TestPortableExecutableBytes -Seed 'same-run managed uv'
+        [System.IO.File]::WriteAllBytes($managedUvPath, $managedUvBytes)
+        $managedCommandProof = @{}
+        & $installEngineModule {
+            param($plan, $proof, $path)
+            Update-HermesManagedCommandProofAfterStage -Plan $plan -ManagedCommandProof $proof -Stage 'uv' -PathValues @($path)
+        } $launcherPlan $managedCommandProof $trustedRegistryGitDirectory
+        $managedBoundary = & $installEngineModule {
+            param($plan, $proof)
+            Test-HermesManagedAbsoluteCommandBoundary -Plan $plan -ManagedCommandProof $proof
+        } $launcherPlan $managedCommandProof
+        [byte[]]$tamperedManagedUvBytes = [System.IO.File]::ReadAllBytes($managedUvPath)
+        $tamperedManagedUvBytes[$tamperedManagedUvBytes.Length - 1] = $tamperedManagedUvBytes[$tamperedManagedUvBytes.Length - 1] -bxor 0x01
+        [System.IO.File]::WriteAllBytes($managedUvPath, $tamperedManagedUvBytes)
+        $tamperedManagedBoundary = & $installEngineModule {
+            param($plan, $proof)
+            Test-HermesManagedAbsoluteCommandBoundary -Plan $plan -ManagedCommandProof $proof
+        } $launcherPlan $managedCommandProof
+        [System.IO.File]::WriteAllBytes($managedUvPath, $managedUvBytes)
+        Remove-Item -LiteralPath $managedUvPath -Force
+        $missingManagedBoundary = & $installEngineModule {
+            param($plan, $proof)
+            Test-HermesManagedAbsoluteCommandBoundary -Plan $plan -ManagedCommandProof $proof
+        } $launcherPlan $managedCommandProof
+        [System.IO.File]::WriteAllBytes($managedUvPath, $managedUvBytes)
+        $managedBrowserUsePath = Join-Path $launcherHome 'bin\browser-use.exe'
+        New-Item -ItemType Directory -Path (Join-Path $launcherHome 'uv-tools') -Force | Out-Null
+        [byte[]]$managedBrowserUseBytes = New-TestPortableExecutableBytes -Seed 'same-run managed browser use'
+        [System.IO.File]::WriteAllBytes($managedBrowserUsePath, $managedBrowserUseBytes)
+        & $installEngineModule {
+            param($plan, $proof, $path)
+            Update-HermesManagedCommandProofAfterStage -Plan $plan -ManagedCommandProof $proof -Stage 'node-deps' -PathValues @($path)
+        } $launcherPlan $managedCommandProof $trustedRegistryGitDirectory
+        $managedBashPath = Join-Path $launcherHome 'git\usr\bin\bash.exe'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $managedBashPath) -Force | Out-Null
+        [System.IO.File]::WriteAllBytes($managedBashPath, [byte[]](New-TestPortableExecutableBytes -Seed 'untrusted managed bash'))
+        $managedBashBoundary = & $installEngineModule {
+            param($plan, $proof)
+            Test-HermesManagedAbsoluteCommandBoundary -Plan $plan -ManagedCommandProof $proof
+        } $launcherPlan $managedCommandProof
+        Remove-Item -LiteralPath $managedBashPath -Force
+        Assert-True ($managedCommandProof.Count -eq 2 -and $managedBoundary.Valid -and -not $tamperedManagedBoundary.Valid -and -not $missingManagedBoundary.Valid -and -not $managedBashBoundary.Valid) 'same-run managed command proof binds uv and browser-use and rejects tamper, deletion, and HermesHome Git Bash'
+
+        $excludeFailureHandoff = & $installEngineModule {
+            param($plan, $commit, $proof)
+            $originalGetState = (Get-Command Get-HermesManagedLauncherExcludeState).ScriptBlock
+            $originalRestoreExclude = (Get-Command Restore-HermesManagedLauncherExcludeFile).ScriptBlock
+            $script:HermesTestOriginalGetExcludeState = $originalGetState
+            $script:HermesTestExcludeStateCalls = 0
+            try {
+                Set-Item -Path 'Function:script:Get-HermesManagedLauncherExcludeState' -Value {
+                    param([string]$InstallDir)
+                    $script:HermesTestExcludeStateCalls++
+                    $state = & $script:HermesTestOriginalGetExcludeState -InstallDir $InstallDir
+                    if ($script:HermesTestExcludeStateCalls -ge 2) { $state.Complete = $false }
+                    return $state
+                }
+                Set-Item -Path 'Function:script:Restore-HermesManagedLauncherExcludeFile' -Value {
+                    param($State, [byte[]]$WrittenBytes)
+                    return $false
+                }
+                try {
+                    Initialize-HermesManagedLauncherExclusions -Plan $plan -ExpectedCommit $commit -FreshCheckoutProof $proof | Out-Null
+                    return [pscustomobject]@{ Exception = $null; Pending = $null }
+                } catch {
+                    return [pscustomobject]@{ Exception = $_.Exception; Pending = $_.Exception.Data['HermesLauncherExcludeWrite'] }
+                }
+            } finally {
+                Set-Item -Path 'Function:script:Get-HermesManagedLauncherExcludeState' -Value $originalGetState
+                Set-Item -Path 'Function:script:Restore-HermesManagedLauncherExcludeFile' -Value $originalRestoreExclude
+                Remove-Variable -Scope Script -Name HermesTestOriginalGetExcludeState -ErrorAction SilentlyContinue
+                Remove-Variable -Scope Script -Name HermesTestExcludeStateCalls -ErrorAction SilentlyContinue
+            }
+        } $launcherPlan $launcherHead $freshProof
+        $excludeHandoffRollback = & $installEngineModule {
+            param($plan, $pending)
+            Invoke-HermesExposureRollback -Snapshot $null -Plan $plan -FreshRepositoryProof $null -LauncherExcludeWrite $pending -LauncherAttestationWrite $null -Paths ([pscustomobject]@{}) -LogPath $null -Context 'exclude handoff test'
+        } $launcherPlan $excludeFailureHandoff.Pending
+        $excludeHandoffRestoredExactly = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($launcherExcludePath)) -ceq [Convert]::ToBase64String([byte[]]$freshProof.ExcludeBytes)
+        Assert-True ($null -ne $excludeFailureHandoff.Exception -and $null -ne $excludeFailureHandoff.Pending -and $excludeHandoffRollback.ExcludeRestored -and $excludeHandoffRestoredExactly) 'post-write exclude failure hands state to independent outer CAS rollback'
+
+        $launcherNormalization = & $installEngineModule {
+            param($plan, $commit, $proof)
+            Initialize-HermesManagedLauncherExclusions -Plan $plan -ExpectedCommit $commit -FreshCheckoutProof $proof
+        } $launcherPlan $launcherHead $freshProof
+        Assert-True ([bool]$launcherNormalization.Valid -and [bool]$launcherNormalization.Changed) 'exact managed launchers normalized from same-run fresh proof'
+        $launcherExcludeText = [System.IO.File]::ReadAllText($launcherExcludePath, [System.Text.Encoding]::UTF8)
+        $launcherActivePatterns = @($launcherExcludeText -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not $_.StartsWith('#') })
+        Assert-True ($launcherActivePatterns.Count -eq 2 -and $launcherActivePatterns -ccontains '/bin/hermes.exe' -and $launcherActivePatterns -ccontains '/bin/hermes-acp.exe') 'only exact launcher files are excluded'
+
+        $launcherPaths = Get-HermesDefaultPaths -HermesHome $launcherHome -InstallDir $launcherRepo -RuntimeRoot $launcherRuntime
+        New-Item -ItemType Directory -Path $launcherPaths.StateDir -Force | Out-Null
+        $omittedManagedCommandRejected = $false
+        try {
+            & $installEngineModule {
+                param($plan, $commit, $digest, $proof)
+                New-HermesLauncherAttestation -Plan $plan -ExpectedCommit $commit -InstallerSha256 $digest -FreshCheckoutProof $proof
+            } $launcherPlan $launcherHead ([string]$source.installer.sha256) $freshProof | Out-Null
+        } catch { $omittedManagedCommandRejected = $true }
+        $launcherAttestation = & $installEngineModule {
+            param($plan, $commit, $digest, $proof, $commandProof)
+            New-HermesLauncherAttestation -Plan $plan -ExpectedCommit $commit -InstallerSha256 $digest -FreshCheckoutProof $proof -ManagedCommandProof $commandProof
+        } $launcherPlan $launcherHead ([string]$source.installer.sha256) $freshProof $managedCommandProof
+        $launcherAttestationWrite = & $installEngineModule {
+            param($paths, $attestation)
+            Set-HermesLauncherAttestation -Paths $paths -Attestation $attestation
+        } $launcherPaths $launcherAttestation
+        $launcherAttestationCheck = & $installEngineModule {
+            param($plan, $commit, $digest)
+            Test-HermesLauncherAttestation -Plan $plan -ExpectedCommit $commit -InstallerSha256 $digest
+        } $launcherPlan $launcherHead ([string]$source.installer.sha256)
+        Assert-True ($omittedManagedCommandRejected -and $launcherAttestation.contract -ceq 'hermes-managed-launchers-and-commands-v1' -and @($launcherAttestation.managedCommands).Count -eq 2 -and $launcherAttestationWrite.Changed -and $launcherAttestationCheck.Valid -and $launcherAttestationCheck.ManagedCommandProof.Count -eq 2 -and (Test-Path -LiteralPath $launcherPaths.LauncherAttestationFile -PathType Leaf)) 'fresh proof publishes canonical nonempty managed command attestation'
+        [byte[]]$attestedUvTamper = [System.IO.File]::ReadAllBytes($managedUvPath)
+        $attestedUvTamper[0x1A0] = $attestedUvTamper[0x1A0] -bxor 0x01
+        [System.IO.File]::WriteAllBytes($managedUvPath, $attestedUvTamper)
+        $tamperedCommandAttestation = & $installEngineModule {
+            param($plan, $commit, $digest)
+            Test-HermesLauncherAttestation -Plan $plan -ExpectedCommit $commit -InstallerSha256 $digest
+        } $launcherPlan $launcherHead ([string]$source.installer.sha256)
+        [System.IO.File]::WriteAllBytes($managedUvPath, $managedUvBytes)
+        $restoredCommandAttestation = & $installEngineModule {
+            param($plan, $commit, $digest)
+            Test-HermesLauncherAttestation -Plan $plan -ExpectedCommit $commit -InstallerSha256 $digest
+        } $launcherPlan $launcherHead ([string]$source.installer.sha256)
+        Assert-True (-not $tamperedCommandAttestation.Valid -and $restoredCommandAttestation.Valid) 'attested managed command tampering is rejected and exact bytes restore validity'
+
+        $launcherStatus = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'status', '--porcelain=v1', '--untracked-files=all') -Environment $launcherEnvironment -TimeoutSeconds 30
+        Assert-True ($launcherStatus.ExitCode -eq 0 -and [string]::IsNullOrWhiteSpace($launcherStatus.StdOut)) 'launcher exclusions leave checkout clean'
+        $unexpectedIgnore = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'check-ignore', '-q', '--no-index', '--', 'bin/unexpected.exe') -Environment $launcherEnvironment -TimeoutSeconds 30
+        Assert-Equal 1 $unexpectedIgnore.ExitCode 'unexpected bin file is not ignored'
+
+        $excludeBeforeRepeat = [System.IO.File]::ReadAllBytes($launcherExcludePath)
+        $staleProofRejected = $false
+        try {
+            & $installEngineModule {
+                param($plan, $commit, $proof)
+                Initialize-HermesManagedLauncherExclusions -Plan $plan -ExpectedCommit $commit -FreshCheckoutProof $proof
+            } $launcherPlan $launcherHead $freshProof | Out-Null
+        } catch { $staleProofRejected = $true }
+        $excludeAfterRepeat = [System.IO.File]::ReadAllBytes($launcherExcludePath)
+        $readOnlyLaunchers = & $installEngineModule { param($path) Test-HermesManagedLaunchers -InstallDir $path } $launcherRepo
+        $readOnlyExclusions = & $installEngineModule { param($path) Test-HermesManagedLauncherExclusions -InstallDir $path } $launcherRepo
+        Assert-True ($staleProofRejected -and $readOnlyLaunchers.Valid -and $readOnlyExclusions.Valid -and [Convert]::ToBase64String($excludeBeforeRepeat) -ceq [Convert]::ToBase64String($excludeAfterRepeat)) 'stale proof cannot rewrite metadata while exact existing contract validates read-only'
+
+        foreach ($name in @('hermes.exe', 'hermes-acp.exe')) {
+            [byte[]]$swappedBytes = New-TestPortableExecutableBytes -Seed "swapped launcher $name"
+            [System.IO.File]::WriteAllBytes((Join-Path $launcherSources $name), $swappedBytes)
+            [System.IO.File]::WriteAllBytes((Join-Path $launcherTargets $name), $swappedBytes)
+        }
+        $swappedManagedPair = & $installEngineModule { param($path) Test-HermesManagedLaunchers -InstallDir $path } $launcherRepo
+        $swappedAttestation = & $installEngineModule {
+            param($plan, $commit, $digest)
+            Test-HermesLauncherAttestation -Plan $plan -ExpectedCommit $commit -InstallerSha256 $digest
+        } $launcherPlan $launcherHead ([string]$source.installer.sha256)
+        Assert-True ($swappedManagedPair.Valid -and -not $swappedAttestation.Valid) 'matching source and target launcher swap is rejected by attestation'
+        foreach ($name in @('hermes.exe', 'hermes-acp.exe')) {
+            [byte[]]$originalBytes = New-TestPortableExecutableBytes -Seed "managed launcher $name"
+            [System.IO.File]::WriteAllBytes((Join-Path $launcherSources $name), $originalBytes)
+            [System.IO.File]::WriteAllBytes((Join-Path $launcherTargets $name), $originalBytes)
+        }
+        $restoredAttestation = & $installEngineModule {
+            param($plan, $commit, $digest)
+            Test-HermesLauncherAttestation -Plan $plan -ExpectedCommit $commit -InstallerSha256 $digest
+        } $launcherPlan $launcherHead ([string]$source.installer.sha256)
+        Assert-True $restoredAttestation.Valid 'original managed launchers restore the attested contract'
+
+        $staticGateLog = Join-Path $launcherRuntime 'static-gate.log'
+        $staticGate = Test-HermesInstallation -HermesHome $launcherHome -InstallDir $launcherRepo -RuntimeRoot $launcherRuntime -ExpectedCommit $launcherHead -LogPath $staticGateLog
+        Assert-True (-not [bool]$staticGate.Verified -and $null -eq $staticGate.VersionExitCode -and [string]::IsNullOrWhiteSpace([string]$staticGate.CommandPath)) 'failed static provenance prevents launcher execution'
+        Assert-True ($staticGate.CheckoutLayoutValid -and $staticGate.IndexMatchesExpectedTree -and $staticGate.IndexFlagsClean -and $staticGate.LocalGitConfigSafe -and $staticGate.RepositoryMetadataSafe -and $staticGate.NoGitLinks -and $staticGate.LauncherAttestationValid) 'static Git layout, metadata, index, and launcher attestation pass clean fixture'
+
+        $addDuplicateWindowsConfig = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'config', '--local', '--add', 'windows.appendAtomically', 'false') -Environment $launcherEnvironment -TimeoutSeconds 30
+        $duplicateWindowsMetadata = & $installEngineModule { param($path) Test-HermesRepositoryMetadataSafety -InstallDir $path } $launcherRepo
+        $unsetWindowsConfig = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'config', '--local', '--unset-all', 'windows.appendAtomically') -Environment $launcherEnvironment -TimeoutSeconds 30
+        $setTrueWindowsConfig = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'config', '--local', 'windows.appendAtomically', 'true') -Environment $launcherEnvironment -TimeoutSeconds 30
+        $trueWindowsMetadata = & $installEngineModule { param($path) Test-HermesRepositoryMetadataSafety -InstallDir $path } $launcherRepo
+        $restoreWindowsConfig = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'config', '--local', '--replace-all', 'windows.appendAtomically', 'false') -Environment $launcherEnvironment -TimeoutSeconds 30
+        Assert-True ($addDuplicateWindowsConfig.ExitCode -eq 0 -and -not $duplicateWindowsMetadata.Valid -and $unsetWindowsConfig.ExitCode -eq 0 -and $setTrueWindowsConfig.ExitCode -eq 0 -and -not $trueWindowsMetadata.Valid -and $restoreWindowsConfig.ExitCode -eq 0) 'windows.appendAtomically allows one exact false value only'
+
+        $filterMarker = Join-Path $launcherRuntime 'filter-executed.marker'
+        $infoAttributesPath = Join-Path $launcherRepo '.git\info\attributes'
+        $filterCommand = 'cmd.exe /d /c echo filter-executed>' + $filterMarker
+        $setFilter = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'config', '--local', 'filter.pwn.clean', $filterCommand) -Environment $launcherEnvironment -TimeoutSeconds 30
+        [System.IO.File]::WriteAllText($infoAttributesPath, ('tracked.txt filter=pwn' + [char]10), (New-Object System.Text.UTF8Encoding($false)))
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $launcherRepo 'tracked.txt'), ('changed' + [char]10), (New-Object System.Text.UTF8Encoding($false)))
+            $filterGate = Test-HermesInstallation -HermesHome $launcherHome -InstallDir $launcherRepo -RuntimeRoot $launcherRuntime -ExpectedCommit $launcherHead -LogPath $staticGateLog
+            Assert-True ($setFilter.ExitCode -eq 0 -and -not $filterGate.RepositoryMetadataSafe -and $null -eq $filterGate.VersionExitCode -and -not (Test-Path -LiteralPath $filterMarker)) 'active info attributes and clean filter are rejected before Git execution'
+        } finally {
+            $removeFilter = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'config', '--local', '--remove-section', 'filter.pwn') -Environment $launcherEnvironment -TimeoutSeconds 30
+            if (Test-Path -LiteralPath $infoAttributesPath -PathType Leaf) { Remove-Item -LiteralPath $infoAttributesPath -Force }
+            [System.IO.File]::WriteAllText((Join-Path $launcherRepo 'tracked.txt'), ('pinned' + [char]10), (New-Object System.Text.UTF8Encoding($false)))
+            if (Test-Path -LiteralPath $filterMarker -PathType Leaf) { Remove-Item -LiteralPath $filterMarker -Force }
+        }
+        Assert-Equal 0 $removeFilter.ExitCode 'malicious local filter fixture is removed'
+
+        $localExcludeFixture = Join-Path $launcherRuntime 'local-excludes.txt'
+        [System.IO.File]::WriteAllBytes($localExcludeFixture, [byte[]]@())
+        $setLocalExclude = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'config', '--local', 'core.excludesFile', $localExcludeFixture) -Environment $launcherEnvironment -TimeoutSeconds 30
+        $localGate = Test-HermesInstallation -HermesHome $launcherHome -InstallDir $launcherRepo -RuntimeRoot $launcherRuntime -ExpectedCommit $launcherHead -LogPath $staticGateLog
+        $unsetLocalExclude = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'config', '--local', '--unset-all', 'core.excludesFile') -Environment $launcherEnvironment -TimeoutSeconds 30
+        Assert-True ($setLocalExclude.ExitCode -eq 0 -and -not [bool]$localGate.LocalExcludeOverrideAbsent -and -not [bool]$localGate.LocalGitConfigSafe -and $null -eq $localGate.VersionExitCode -and $unsetLocalExclude.ExitCode -eq 0) 'local core.excludesFile override blocks execution'
+
+        $setSkipWorktree = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'update-index', '--skip-worktree', 'tracked.txt') -Environment $launcherEnvironment -TimeoutSeconds 30
+        $skipWorktreeGate = Test-HermesInstallation -HermesHome $launcherHome -InstallDir $launcherRepo -RuntimeRoot $launcherRuntime -ExpectedCommit $launcherHead -LogPath $staticGateLog
+        $clearSkipWorktree = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'update-index', '--no-skip-worktree', 'tracked.txt') -Environment $launcherEnvironment -TimeoutSeconds 30
+        Assert-True ($setSkipWorktree.ExitCode -eq 0 -and -not [bool]$skipWorktreeGate.IndexFlagsClean -and $null -eq $skipWorktreeGate.VersionExitCode -and $clearSkipWorktree.ExitCode -eq 0) 'skip-worktree index flag blocks execution'
+
+        $unexpectedPath = Join-Path $launcherTargets 'unexpected.exe'
+        [System.IO.File]::WriteAllText($unexpectedPath, 'unexpected', (New-Object System.Text.UTF8Encoding($false)))
+        $excludeBeforeRejectedRun = [System.IO.File]::ReadAllBytes($launcherExcludePath)
+        $unexpectedLaunchers = & $installEngineModule { param($path) Test-HermesManagedLaunchers -InstallDir $path } $launcherRepo
+        $excludeAfterRejectedRun = [System.IO.File]::ReadAllBytes($launcherExcludePath)
+        Assert-True (-not [bool]$unexpectedLaunchers.Valid -and [Convert]::ToBase64String($excludeBeforeRejectedRun) -ceq [Convert]::ToBase64String($excludeAfterRejectedRun)) 'unexpected bin file fails closed without metadata mutation'
+        Remove-Item -LiteralPath $unexpectedPath -Force
+
+        [System.IO.File]::WriteAllText((Join-Path $launcherTargets 'hermes.exe'), 'tampered', (New-Object System.Text.UTF8Encoding($false)))
+        $tamperedLaunchers = & $installEngineModule { param($path) Test-HermesManagedLaunchers -InstallDir $path } $launcherRepo
+        Assert-True (-not [bool]$tamperedLaunchers.Valid) 'launcher hash tampering rejected'
+        Copy-Item -LiteralPath (Join-Path $launcherSources 'hermes.exe') -Destination (Join-Path $launcherTargets 'hermes.exe') -Force
+
+        [System.IO.File]::WriteAllText($launcherExcludePath, ($launcherExcludeText + "/bin/`n"), (New-Object System.Text.UTF8Encoding($false)))
+        $broadExclude = & $installEngineModule { param($path) Test-HermesManagedLauncherExclusions -InstallDir $path } $launcherRepo
+        Assert-True (-not [bool]$broadExclude.Valid) 'broad launcher exclusion rejected'
+
+        [System.IO.File]::WriteAllBytes($launcherExcludePath, [byte[]]$excludeBeforeRepeat)
+        $rollbackIsolation = & $installEngineModule {
+            param($snapshot, $plan, $proof, $excludeWrite, $attestationWrite, $paths, $log)
+            Invoke-HermesExposureRollback -Snapshot $snapshot -Plan $plan -FreshRepositoryProof $proof -LauncherExcludeWrite $excludeWrite -LauncherAttestationWrite $attestationWrite -Paths $paths -LogPath $log -Context 'test rollback'
+        } ([pscustomobject]@{}) $launcherPlan $freshProof $launcherNormalization.ExcludeWrite $launcherAttestationWrite $launcherPaths $staticGateLog
+        $excludeRestoredExactly = $(if ([bool]$freshProof.ExcludeExists) {
+            (Test-Path -LiteralPath $launcherExcludePath -PathType Leaf) -and
+                [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($launcherExcludePath)) -ceq [Convert]::ToBase64String([byte[]]$freshProof.ExcludeBytes)
+        } else {
+            -not (Test-Path -LiteralPath $launcherExcludePath)
+        })
+        Assert-True ($rollbackIsolation.Errors.Count -ge 1 -and $rollbackIsolation.ExcludeRestored -and $rollbackIsolation.RemovedLaunchers.Count -eq 2 -and $rollbackIsolation.AttestationRemoved -and $excludeRestoredExactly -and -not (Test-Path -LiteralPath $launcherPaths.LauncherAttestationFile) -and -not (Test-Path -LiteralPath (Join-Path $launcherTargets 'hermes.exe')) -and -not (Test-Path -LiteralPath (Join-Path $launcherTargets 'hermes-acp.exe'))) 'rollback cleanup remains independent when PATH restoration throws'
+    } finally {
+        Remove-HermesStageEnvironmentArtifacts -Environment $launcherEnvironment -Plan $launcherPlan
+    }
 
     $unsignedGitHome = Join-Path $testRootFull 'unsigned-git-home'
     $unsignedGitFixture = Join-Path $unsignedGitHome 'git\cmd\git.exe'
@@ -151,6 +725,96 @@ try {
 
     Assert-Equal 'plain' (ConvertTo-WindowsProcessArgument -Argument 'plain') 'plain argv unchanged'
     Assert-Equal '"two words"' (ConvertTo-WindowsProcessArgument -Argument 'two words') 'space argv quoted'
+
+    $pathProbeVariable = 'HERMES_EASY_SETUP_PATH_PROBE'
+    $previousPathProbe = [Environment]::GetEnvironmentVariable($pathProbeVariable, [EnvironmentVariableTarget]::Process)
+    $pathProbeTarget = Join-Path $testRootFull 'path-probe\bin'
+    try {
+        [Environment]::SetEnvironmentVariable($pathProbeVariable, $pathProbeTarget, [EnvironmentVariableTarget]::Process)
+        $quotedPathProbe = '  ' + [char]34 + $pathProbeTarget + '\' + [char]34 + '  '
+        $expandedPathProbe = '%' + $pathProbeVariable + '%'
+        $quotedPathDetected = & $installEngineModule {
+            param($value, $directory)
+            Test-HermesPathContainsDirectory -PathValues @($value) -Directory $directory
+        } $quotedPathProbe $pathProbeTarget
+        $expandedPathDetected = & $installEngineModule {
+            param($value, $directory)
+            Test-HermesPathContainsDirectory -PathValues @($value) -Directory $directory
+        } $expandedPathProbe $pathProbeTarget
+        Assert-True ($quotedPathDetected -and $expandedPathDetected) 'PATH comparison canonicalizes quotes, trailing separators, and environment variables'
+
+        $postconditionLauncher = [System.IO.Path]::GetFullPath((Join-Path $planA.InstallDir 'bin'))
+        $postconditionSnapshot = [pscustomobject]@{
+            ExpectedPath = "$postconditionLauncher;C:\Windows\System32"
+            ExpectedHermesHome = [string]$planA.HermesHome
+            LauncherDirectory = $postconditionLauncher
+        }
+        $validPathPostcondition = & $installEngineModule {
+            param($plan, $snapshot, $path, $home)
+            Test-HermesPathStagePostcondition -Plan $plan -Snapshot $snapshot -UserPath $path -UserHermesHome $home
+        } $planA $postconditionSnapshot $postconditionSnapshot.ExpectedPath $planA.HermesHome
+        $extraPathPostcondition = & $installEngineModule {
+            param($plan, $snapshot, $path, $home)
+            Test-HermesPathStagePostcondition -Plan $plan -Snapshot $snapshot -UserPath $path -UserHermesHome $home
+        } $planA $postconditionSnapshot ($postconditionSnapshot.ExpectedPath + ';C:\extra') $planA.HermesHome
+        $suffixPathPostcondition = & $installEngineModule {
+            param($plan, $snapshot, $path, $home)
+            Test-HermesPathStagePostcondition -Plan $plan -Snapshot $snapshot -UserPath $path -UserHermesHome $home
+        } $planA $postconditionSnapshot (($postconditionSnapshot.ExpectedPath).Replace($postconditionLauncher, ($postconditionLauncher + '-suffix'))) $planA.HermesHome
+        $wrongHomePostcondition = & $installEngineModule {
+            param($plan, $snapshot, $path, $home)
+            Test-HermesPathStagePostcondition -Plan $plan -Snapshot $snapshot -UserPath $path -UserHermesHome $home
+        } $planA $postconditionSnapshot $postconditionSnapshot.ExpectedPath (Join-Path $testRootFull 'wrong-home')
+        $canonicalHomePostcondition = & $installEngineModule {
+            param($plan, $snapshot, $path, $home)
+            Test-HermesPathStagePostcondition -Plan $plan -Snapshot $snapshot -UserPath $path -UserHermesHome $home
+        } $planA $postconditionSnapshot $postconditionSnapshot.ExpectedPath ($planA.HermesHome.ToUpperInvariant() + '\')
+        Assert-True ($validPathPostcondition.Valid -and -not $extraPathPostcondition.Valid -and -not $suffixPathPostcondition.Valid -and -not $wrongHomePostcondition.Valid -and $canonicalHomePostcondition.Valid) 'PATH stage requires the exact predicted PATH and canonical exact HERMES_HOME'
+
+        $legacyDirectory = [System.IO.Path]::GetFullPath((Join-Path $planA.InstallDir 'venv\Scripts'))
+        $rawPathCases = @(
+            [pscustomobject]@{ Input = "C:\x;$legacyDirectory;"; Expected = "$postconditionLauncher;C:\x" },
+            [pscustomobject]@{ Input = ('C:\x;"' + $legacyDirectory + '";'); Expected = ($postconditionLauncher + ';C:\x;"' + $legacyDirectory + '"') },
+            [pscustomobject]@{ Input = "C:\x;$legacyDirectory\;"; Expected = "$postconditionLauncher;C:\x;$legacyDirectory\" },
+            [pscustomobject]@{ Input = $null; Expected = "$postconditionLauncher;" },
+            [pscustomobject]@{ Input = ($postconditionLauncher + '-suffix;C:\x'); Expected = ($postconditionLauncher + '-suffix;C:\x') }
+        )
+        $rawPathMatches = 0
+        foreach ($rawCase in $rawPathCases) {
+            $rawResult = & $installEngineModule {
+                param($plan, $path)
+                Get-HermesUpstreamPathStageValues -Plan $plan -UserPath $path -UserHermesHome $null
+            } $planA $rawCase.Input
+            if ([string]$rawResult.UserPath -ceq [string]$rawCase.Expected) { $rawPathMatches++ }
+        }
+        $suffixRawResult = & $installEngineModule {
+            param($plan, $path)
+            $values = Get-HermesUpstreamPathStageValues -Plan $plan -UserPath $path -UserHermesHome $null
+            $snapshot = [pscustomobject]@{ ExpectedPath = $values.UserPath; ExpectedHermesHome = $values.UserHermesHome; LauncherDirectory = (Join-Path $plan.InstallDir 'bin') }
+            Test-HermesPathStagePostcondition -Plan $plan -Snapshot $snapshot -UserPath $values.UserPath -UserHermesHome $values.UserHermesHome
+        } $planA ($postconditionLauncher + '-suffix;C:\x')
+        Assert-True ($rawPathMatches -eq $rawPathCases.Count -and -not $suffixRawResult.Valid) 'PATH snapshot models pinned upstream raw substring and empty-segment semantics byte-for-byte while requiring an exact launcher entry'
+
+        $pathHomeRollbackIsolation = & $installEngineModule {
+            param($plan)
+            $originalPathRestore = (Get-Command Restore-HermesRejectedUserPathExposure).ScriptBlock
+            $originalHomeRestore = (Get-Command Restore-HermesRejectedHermesHomeExposure).ScriptBlock
+            $originalGitBashRestore = (Get-Command Restore-HermesRejectedGitBashExposure).ScriptBlock
+            try {
+                Set-Item -Path 'Function:script:Restore-HermesRejectedUserPathExposure' -Value { throw 'forced path restore failure' }
+                Set-Item -Path 'Function:script:Restore-HermesRejectedHermesHomeExposure' -Value { return $true }
+                Set-Item -Path 'Function:script:Restore-HermesRejectedGitBashExposure' -Value { return $true }
+                Invoke-HermesExposureRollback -Snapshot ([pscustomobject]@{}) -Plan $plan -FreshRepositoryProof $null -LauncherExcludeWrite $null -LauncherAttestationWrite $null -Paths ([pscustomobject]@{}) -LogPath $null -Context 'path/home isolation test'
+            } finally {
+                Set-Item -Path 'Function:script:Restore-HermesRejectedUserPathExposure' -Value $originalPathRestore
+                Set-Item -Path 'Function:script:Restore-HermesRejectedHermesHomeExposure' -Value $originalHomeRestore
+                Set-Item -Path 'Function:script:Restore-HermesRejectedGitBashExposure' -Value $originalGitBashRestore
+            }
+        } $planA
+        Assert-True (-not $pathHomeRollbackIsolation.PathRestored -and $pathHomeRollbackIsolation.HermesHomeRestored -and $pathHomeRollbackIsolation.GitBashPathRestored -and $pathHomeRollbackIsolation.Errors.Count -eq 1 -and [string]$pathHomeRollbackIsolation.Errors[0] -like 'path:*') 'HERMES_HOME and Git Bash rollback still run when PATH rollback throws'
+    } finally {
+        [Environment]::SetEnvironmentVariable($pathProbeVariable, $previousPathProbe, [EnvironmentVariableTarget]::Process)
+    }
     $probeVariable = 'HERMES_EASY_SETUP_REMOVE_PROBE'
     $previousProbe = [Environment]::GetEnvironmentVariable($probeVariable, [EnvironmentVariableTarget]::Process)
     try {
@@ -162,6 +826,11 @@ try {
     } finally {
         [Environment]::SetEnvironmentVariable($probeVariable, $previousProbe, [EnvironmentVariableTarget]::Process)
     }
+
+    $missingExecutable = Join-Path $testRootFull 'missing-process-start.exe'
+    $startFailure = Invoke-HermesProcess -FilePath $missingExecutable -ArgumentList @('--version') -TimeoutSeconds 30
+    Assert-True (-not $startFailure.Started -and $startFailure.ExitCode -eq -1 -and $startFailure.StartFailure -ceq 'ProcessStartFailed' -and -not $startFailure.TimedOut) 'Process.Start failure returns a structured diagnostic result'
+
     $frameText = 'noise' + [Environment]::NewLine + '{"stage":"one","ok":true}' + [Environment]::NewLine + 'more'
     $frame = ConvertFrom-HermesJsonFrame -Text $frameText -RequiredProperty 'stage'
     Assert-Equal 'one' $frame.stage 'last valid JSON frame parsed'

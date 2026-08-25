@@ -58,9 +58,9 @@
         <Grid Grid.Row="1" Margin="0,16,0,0">
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
           <StackPanel Grid.Column="0" Margin="0,0,20,0">
-            <CheckBox x:Name="IncludeDesktopCheck" Content="Hermes Desktop도 빌드 (시간·용량 증가)"/>
-            <CheckBox x:Name="SkipComputerUseCheck" Margin="0,12,0,0" IsChecked="True"
-                      Content="Computer Use 사전 설치 건너뛰기 (권장)"/>
+            <CheckBox x:Name="IncludeDesktopCheck" IsEnabled="False" Content="Hermes Desktop 자동 빌드 (후속 버전 예정)"/>
+            <CheckBox x:Name="SkipComputerUseCheck" Margin="0,12,0,0" IsChecked="True" IsEnabled="False"
+                      Content="Computer Use 사전 설치 건너뛰기 (v0.1.1 보안 정책)"/>
           </StackPanel>
           <StackPanel Grid.Column="1">
             <TextBlock Text="설치 후 공급자 설정"/>
