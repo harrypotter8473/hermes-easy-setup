@@ -69,9 +69,18 @@ jobs:
           Import-Module (Join-Path $env:GITHUB_WORKSPACE 'src\HermesEasySetup.Loader.psm1') -Force
           $baselineGit = Get-HermesVerificationGitPath -HermesHome $hermesHome
           if ([string]::IsNullOrWhiteSpace($baselineGit)) { throw 'No trusted Program Files Git is available for the E2E registry PATH baseline.' }
+          $machineRegistryPath = @(
+            (Join-Path $env:SystemRoot 'System32'),
+            $env:SystemRoot,
+            (Join-Path $env:SystemRoot 'System32\Wbem'),
+            (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0'),
+            (Join-Path $env:SystemRoot 'System32\OpenSSH')
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | Select-Object -Unique
+          $machineRegistryPath = $machineRegistryPath -join [System.IO.Path]::PathSeparator
+          [Environment]::SetEnvironmentVariable('Path', $machineRegistryPath, [EnvironmentVariableTarget]::Machine)
+          if (-not [string]::Equals([Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine), $machineRegistryPath, [System.StringComparison]::Ordinal)) { throw 'Could not establish the clean Machine PATH baseline.' }
           $baselineGitDirectory = Split-Path -Parent $baselineGit
-          $runnerUserRegistryPath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User)
-          $originalUserRegistryPath = $(if ([string]::IsNullOrWhiteSpace($runnerUserRegistryPath)) { $baselineGitDirectory } else { "$baselineGitDirectory;$runnerUserRegistryPath" })
+          $originalUserRegistryPath = $baselineGitDirectory
           [Environment]::SetEnvironmentVariable('Path', $originalUserRegistryPath, [EnvironmentVariableTarget]::User)
           try {
             $hostileUserRegistryPath = $(if ([string]::IsNullOrWhiteSpace($originalUserRegistryPath)) { $hostileGitBin } else { $hostileGitBin + [System.IO.Path]::PathSeparator + $originalUserRegistryPath })
@@ -242,4 +251,4 @@ jobs:
           $staleStageProfiles = @(Get-ChildItem -LiteralPath $runtimeRoot -Directory -Force | Where-Object { $_.Name -match '^stage-profile-[0-9a-f]{32}$' })
           if ($staleStageProfiles.Count -ne 0) { throw 'Isolated stage profiles were not removed.' }
 
-          "### Hermes Easy Setup E2E`n`n- Scope: base Hermes CLI`n- Release: $($source.hermes.releaseTag)`n- Peeled commit: $head`n- User environment transition: exact`n- Hostile PATH/config/common-dir: overridden`n- Checkout EOL: LF/LF`n- Checkout clean: yes`n- Computer Use/Desktop/setup/credentials executed: no`n- Result: verified" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          "### Hermes Easy Setup E2E`n`n- Scope: base Hermes CLI`n- Release: $($source.hermes.releaseTag)`n- Peeled commit: $head`n- Registry PATH baseline: clean system commands + trusted Git`n- User environment transition: exact`n- Hostile PATH/config/common-dir: overridden`n- Checkout EOL: LF/LF`n- Checkout clean: yes`n- Computer Use/Desktop/setup/credentials executed: no`n- Result: verified" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
