@@ -209,9 +209,13 @@ jobs:
           $finalState = Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'state\install-state.json') | ConvertFrom-Json
           $configureState = @($finalState.stages | Where-Object { [string]$_.name -eq 'configure' })
           $gatewayState = @($finalState.stages | Where-Object { [string]$_.name -eq 'gateway' })
+          $nodeDepsState = @($finalState.stages | Where-Object { [string]$_.name -eq 'node-deps' })
           $desktopState = @($finalState.stages | Where-Object { [string]$_.name -eq 'desktop' })
-          if ([string]$finalState.status -cne 'Completed' -or $configureState.Count -ne 1 -or [string]$configureState[0].status -cne 'Skipped' -or $gatewayState.Count -ne 1 -or [string]$gatewayState[0].status -cne 'Skipped' -or $desktopState.Count -ne 0) { throw 'Final state is outside the v0.1.1 base CLI scope.' }
-          if (@($attestation.managedCommands | Where-Object { [string]$_.command -eq 'cua-driver' }).Count -ne 0) { throw 'Computer Use driver was unexpectedly attested.' }
+          if ([string]$finalState.status -cne 'Completed' -or $configureState.Count -ne 1 -or [string]$configureState[0].status -cne 'Skipped' -or $gatewayState.Count -ne 1 -or [string]$gatewayState[0].status -cne 'Skipped' -or $nodeDepsState.Count -ne 1 -or [string]$nodeDepsState[0].status -cne 'Skipped' -or [string]$nodeDepsState[0].reason -notlike '*Browser/TUI*' -or $desktopState.Count -ne 0) { throw 'Final state is outside the v0.1.1 base CLI scope.' }
+          if (@($attestation.managedCommands | Where-Object { @('browser-use', 'cua-driver') -contains [string]$_.command }).Count -ne 0) { throw 'Deferred browser or Computer Use command was unexpectedly attested.' }
+          foreach ($deferredArtifact in @((Join-Path $hermesHome 'bin\browser-use.exe'), (Join-Path $installDir 'node_modules'), (Join-Path $installDir 'ui-tui\node_modules'))) {
+            if (Test-Path -LiteralPath $deferredArtifact) { throw "Deferred node-deps artifact exists: $deferredArtifact" }
+          }
 
           $excludePath = Join-Path $installDir '.git\info\exclude'
           $excludeLines = @(Get-Content -LiteralPath $excludePath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not $_.StartsWith('#') })
@@ -228,6 +232,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "git rev-parse failed with exit code $LASTEXITCODE" }
           $head = ($headText -join "`n").Trim()
           if ($head -ne [string]$source.hermes.commitSha) { throw 'Checkout HEAD mismatch.' }
+          & $git -C $installDir diff --exit-code $head -- package-lock.json ui-tui/package-lock.json
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned package lockfiles changed.' }
 
           $autocrlfText = @(& $git -C $installDir config --bool --get core.autocrlf)
           if ($LASTEXITCODE -ne 0) { throw "git config failed with exit code $LASTEXITCODE" }
@@ -251,4 +257,4 @@ jobs:
           $staleStageProfiles = @(Get-ChildItem -LiteralPath $runtimeRoot -Directory -Force | Where-Object { $_.Name -match '^stage-profile-[0-9a-f]{32}$' })
           if ($staleStageProfiles.Count -ne 0) { throw 'Isolated stage profiles were not removed.' }
 
-          "### Hermes Easy Setup E2E`n`n- Scope: base Hermes CLI`n- Release: $($source.hermes.releaseTag)`n- Peeled commit: $head`n- Registry PATH baseline: clean system commands + trusted Git`n- User environment transition: exact`n- Hostile PATH/config/common-dir: overridden`n- Checkout EOL: LF/LF`n- Checkout clean: yes`n- Computer Use/Desktop/setup/credentials executed: no`n- Result: verified" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          "### Hermes Easy Setup E2E`n`n- Scope: core Hermes CLI`n- Release: $($source.hermes.releaseTag)`n- Peeled commit: $head`n- Registry PATH baseline: clean system commands + trusted Git`n- User environment transition: exact`n- Hostile PATH/config/common-dir: overridden`n- Checkout EOL: LF/LF`n- Checkout clean: yes`n- Browser/TUI npm, Computer Use, Desktop, setup, credentials executed: no`n- Result: verified" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY

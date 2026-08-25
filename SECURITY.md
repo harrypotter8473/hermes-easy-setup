@@ -53,7 +53,7 @@ path snapshot 뒤 후속 stage 또는 최종 Verify가 실패하면 PATH/HERMES_
 
 ## 보장 범위 밖
 
-- v0.1.1의 Computer Use 사전 설치와 Hermes Desktop 자동 빌드
+- v0.1.1의 선택적 Browser/TUI npm 의존성 설치, Computer Use 사전 설치와 Hermes Desktop 자동 빌드
 - DOS 8.3 짧은 경로 표기 지원(긴 절대 경로를 사용해야 함)
 - 공식 설치기가 받는 모든 전이 의존성의 완전한 고정·재현 빌드
 - launcher attestation 바깥의 전체 venv·Python/Node 패키지 진위

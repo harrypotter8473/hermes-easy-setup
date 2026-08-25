@@ -59,7 +59,7 @@ v1은 `InstallDir == HermesHome\hermes-agent`를 강제합니다. RuntimeRoot는
 
 fresh `repository`는 RuntimeRoot의 예측 불가능한 managed global 설정과 빈 attributes/excludes를 `CreateNew`로 만들고 LF checkout을 선행합니다. fresh mode는 system Git 설정을 유지합니다. 기존/재개 stage와 정적 verification은 별도 managed global을 쓰고 system 설정까지 끕니다. 세 모드 모두 user global 파일을 읽거나 수정하지 않으며 일회성 파일은 stage 뒤 제거합니다.
 
-v0.1.1은 기본 CLI stage만 실행하고 `-SkipComputerUse`를 강제합니다. Computer Use 사전 설치와 Desktop stage는 후속 버전까지 설치 진입 전에 거부합니다. 실행되는 일반 stage 제한은 30분, dependencies/node-deps/platform-sdks는 90분입니다. timeout이면 정확한 System32 `taskkill.exe /T /F`로 해당 프로세스 트리를 정리합니다. path snapshot 이후 caught failure는 PATH/HERMES_HOME, 이번 exclude write, exact launcher와 attestation을 독립적으로 compare/CAS 복구하지만 checkout·venv·dependencies·실패 state 전체를 원복하지는 않습니다.
+v0.1.1은 core CLI stage만 실행하고 `-SkipComputerUse`를 강제합니다. 선택적 Browser/TUI npm 설치인 `node-deps`는 child process를 만들기 전에 정책상 `Skipped`로 기록하며, Computer Use 사전 설치와 Desktop stage는 후속 버전까지 설치 진입 전에 거부합니다. 실행되는 일반 stage 제한은 30분, dependencies/platform-sdks는 90분입니다. timeout이면 정확한 System32 `taskkill.exe /T /F`로 해당 프로세스 트리를 정리합니다. path snapshot 이후 caught failure는 PATH/HERMES_HOME, 이번 exclude write, exact launcher와 attestation을 독립적으로 compare/CAS 복구하지만 checkout·venv·dependencies·실패 state 전체를 원복하지는 않습니다.
 
 `-Resume`은 schema, Running/Failed 상태, 계획 지문, manifest와 v0.1.1 attestation의 전체 정적 provenance가 모두 같은 경우만 허용됩니다. 이전 success 기록은 재개하지 않습니다. fresh in-memory proof는 상태 파일에 저장하지 않고 정상 caught failure는 새 attestation도 제거하므로, attestation 발급 뒤 비정상 종료로 두 기록이 함께 남은 제한된 경우만 모든 자동 단계를 Pending으로 되돌려 공식 idempotent stage를 다시 적용합니다. `configure`와 `gateway`는 별도 대화형 설정으로 넘깁니다.
 

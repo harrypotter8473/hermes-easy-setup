@@ -338,6 +338,16 @@ function Get-HermesStageTimeoutSeconds {
     }
 }
 
+function Get-HermesMvpPolicyStageSkipReason {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Stage)
+
+    if ($Stage -ceq 'node-deps') {
+        return 'v0.1.1 초기판은 core Hermes CLI만 설치하므로 선택적 Browser/TUI npm 의존성은 후속 버전까지 자동 실행하지 않습니다.'
+    }
+    return $null
+}
+
 function Test-HermesStageFrame {
     param(
         [AllowNull()]$Frame,
@@ -2877,6 +2887,14 @@ function Invoke-HermesInstall {
                 $state = Set-HermesStageRecord -State $state -Name $name -Status 'Skipped' -Reason '공식 대화형 설정으로 별도 실행합니다.' -InstallerSha256 $installer.Sha256
                 [void](Save-HermesInstallState -LiteralPath $paths.StateFile -State $state)
                 [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'stage' -Stage $name -State 'skipped' -Message "$($stage.title): 설치 후 별도 설정" -Percent $percentEnd)
+                continue
+            }
+            $policySkipReason = Get-HermesMvpPolicyStageSkipReason -Stage $name
+            if (-not [string]::IsNullOrWhiteSpace($policySkipReason)) {
+                $state = Set-HermesStageRecord -State $state -Name $name -Status 'Skipped' -Reason $policySkipReason -InstallerSha256 $installer.Sha256
+                [void](Save-HermesInstallState -LiteralPath $paths.StateFile -State $state)
+                [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'stage' -Stage $name -State 'skipped' -Message $policySkipReason -Percent $percentEnd)
+                Write-HermesEasySetupLog -LiteralPath $logPath -Message "단계 정책 건너뜀: $name / $policySkipReason"
                 continue
             }
 

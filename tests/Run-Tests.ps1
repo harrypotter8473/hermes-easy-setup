@@ -266,12 +266,17 @@ try {
         $vbsOnlyGitDirectory = Join-Path $testRootFull 'vbs-only-registry-git'
         New-Item -ItemType Directory -Path $vbsOnlyGitDirectory -Force | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $vbsOnlyGitDirectory 'git.vbs'), 'WScript.Echo "hostile"', (New-Object System.Text.ASCIIEncoding))
-        $vbsProbeEnvironment = @{}
-        foreach ($environmentKey in $repositoryEnvironmentAgain.Keys) { $vbsProbeEnvironment[$environmentKey] = $repositoryEnvironmentAgain[$environmentKey] }
-        $vbsProbeEnvironment['PATH'] = $vbsOnlyGitDirectory + [System.IO.Path]::PathSeparator + $trustedRegistryGitDirectory
-        $vbsProbeCommand = '$command = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1; [Console]::Out.WriteLine($command.Source)'
-        $vbsProbeResult = Invoke-HermesProcess -FilePath (Get-HermesPowerShellExecutable) -ArgumentList @('-NoLogo', '-NoProfile', '-Command', $vbsProbeCommand) -Environment $vbsProbeEnvironment -TimeoutSeconds 30
-        Assert-True ($vbsProbeResult.ExitCode -eq 0 -and [string]::Equals($vbsProbeResult.StdOut.Trim(), $signedSystemGit, [System.StringComparison]::OrdinalIgnoreCase)) 'fixed PATHEXT prevents a registry PATH git.vbs from shadowing trusted Git'
+        $previousProbePath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Process)
+        $previousProbePathExt = [Environment]::GetEnvironmentVariable('PATHEXT', [EnvironmentVariableTarget]::Process)
+        try {
+            [Environment]::SetEnvironmentVariable('Path', $vbsOnlyGitDirectory + [System.IO.Path]::PathSeparator + $trustedRegistryGitDirectory, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('PATHEXT', [string]$repositoryEnvironmentAgain['PATHEXT'], [EnvironmentVariableTarget]::Process)
+            $resolvedVbsProbeGit = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        } finally {
+            [Environment]::SetEnvironmentVariable('Path', $previousProbePath, [EnvironmentVariableTarget]::Process)
+            [Environment]::SetEnvironmentVariable('PATHEXT', $previousProbePathExt, [EnvironmentVariableTarget]::Process)
+        }
+        Assert-True ([string]::Equals([string]$resolvedVbsProbeGit.Source, $signedSystemGit, [System.StringComparison]::OrdinalIgnoreCase)) 'fixed PATHEXT prevents a registry PATH git.vbs from shadowing trusted Git'
 
         Remove-HermesStageEnvironmentArtifacts -Environment $repositoryEnvironment -Plan $planA
         Remove-HermesStageEnvironmentArtifacts -Environment $repositoryEnvironmentAgain -Plan $planA
@@ -406,7 +411,9 @@ try {
         $launcherInit = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('init', $launcherRepo) -Environment $launcherEnvironment -TimeoutSeconds 30
         [System.IO.File]::WriteAllText((Join-Path $launcherRepo '.gitignore'), "/venv/`n", (New-Object System.Text.UTF8Encoding($false)))
         [System.IO.File]::WriteAllText((Join-Path $launcherRepo 'tracked.txt'), "pinned`n", (New-Object System.Text.UTF8Encoding($false)))
-        $launcherAdd = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'add', '--', '.gitignore', 'tracked.txt') -Environment $launcherEnvironment -TimeoutSeconds 30
+        $launcherPackageLock = Join-Path $launcherRepo 'package-lock.json'
+        [System.IO.File]::WriteAllText($launcherPackageLock, "{}`n", (New-Object System.Text.UTF8Encoding($false)))
+        $launcherAdd = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'add', '--', '.gitignore', 'tracked.txt', 'package-lock.json') -Environment $launcherEnvironment -TimeoutSeconds 30
         $launcherCommit = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-c', 'user.name=Hermes Test', '-c', 'user.email=hermes-test@example.invalid', '-C', $launcherRepo, 'commit', '-m', 'fixture') -Environment $launcherEnvironment -TimeoutSeconds 30
         $launcherRemote = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'remote', 'add', 'origin', 'https://github.com/NousResearch/hermes-agent.git') -Environment $launcherEnvironment -TimeoutSeconds 30
         $launcherWindowsConfig = Invoke-HermesProcess -FilePath $signedSystemGit -ArgumentList @('-C', $launcherRepo, 'config', '--local', 'windows.appendAtomically', 'false') -Environment $launcherEnvironment -TimeoutSeconds 30
@@ -425,6 +432,13 @@ try {
         try { & $installEngineModule { param($seed, $plan, $commit) New-HermesFreshRepositoryProof -Seed $seed -Plan $plan -ExpectedCommit $commit } $freshSeed $launcherPlan $launcherHead | Out-Null } catch { $dirtyProofRejected = $true }
         Remove-Item -LiteralPath $proofDirtyPath -Force
         Assert-True $dirtyProofRejected 'fresh proof rejects an untracked repository change'
+
+        $launcherPackageLockBytes = [System.IO.File]::ReadAllBytes($launcherPackageLock)
+        [System.IO.File]::WriteAllText($launcherPackageLock, '{"changed":true}', (New-Object System.Text.UTF8Encoding($false)))
+        $dirtyLockfileProofRejected = $false
+        try { & $installEngineModule { param($seed, $plan, $commit) New-HermesFreshRepositoryProof -Seed $seed -Plan $plan -ExpectedCommit $commit } $freshSeed $launcherPlan $launcherHead | Out-Null } catch { $dirtyLockfileProofRejected = $true }
+        [System.IO.File]::WriteAllBytes($launcherPackageLock, $launcherPackageLockBytes)
+        Assert-True $dirtyLockfileProofRejected 'fresh proof still rejects tracked package-lock churn'
 
         $launcherExcludePath = Join-Path $launcherRepo '.git\info\exclude'
         $excludeStateBeforeRace = & $installEngineModule { param($path) Get-HermesManagedLauncherExcludeState -InstallDir $path } $launcherRepo
@@ -840,6 +854,9 @@ try {
     Assert-Equal 'one' $frame.stage 'last valid JSON frame parsed'
     Assert-True (Test-HermesStageFrame -Frame ([pscustomobject]@{stage='uv';ok=$true;skipped=$false;reason=$null;duration_ms=1}) -ExpectedStage 'uv').Valid 'valid stage frame accepted'
     Assert-True (-not (Test-HermesStageFrame -Frame ([pscustomobject]@{stage='wrong';ok=$true;skipped=$false;reason=$null;duration_ms=1}) -ExpectedStage 'uv').Valid) 'wrong stage frame rejected'
+    $nodeDepsPolicyReason = & $installEngineModule { Get-HermesMvpPolicyStageSkipReason -Stage 'node-deps' }
+    $pathPolicyReason = & $installEngineModule { Get-HermesMvpPolicyStageSkipReason -Stage 'path' }
+    Assert-True (-not [string]::IsNullOrWhiteSpace($nodeDepsPolicyReason) -and [string]::IsNullOrWhiteSpace($pathPolicyReason)) 'v0.1.1 policy skips only optional node-deps'
 
     $contract = Get-Content -Raw (Join-Path $projectRoot 'config\hermes-manifest.json') | ConvertFrom-Json
     function New-TestManifest([bool]$Desktop) {

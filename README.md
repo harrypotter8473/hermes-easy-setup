@@ -8,7 +8,7 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 
 - 버전 `0.1.1` Windows 네이티브 MVP
 - 초기 범위는 Hermes CLI 설치·검증과 공식 설정 화면 연결까지입니다.
-- Computer Use 사전 설치와 Hermes Desktop 자동 빌드는 후속 버전으로 미룹니다. GUI는 두 옵션을 고정하며 CLI 설치에는 `-SkipComputerUse`가 필요합니다.
+- 선택적 Browser/TUI npm 의존성, Computer Use 사전 설치와 Hermes Desktop 자동 빌드는 후속 버전으로 미룹니다. GUI는 Computer Use/Desktop 옵션을 고정하며 CLI 설치에는 `-SkipComputerUse`가 필요합니다.
 - Windows 10/11 x64에서 로컬 및 CI 검증
 - ARM64는 Hermes upstream Tier 1 대상이지만 이 마법사는 아직 실기기 미검증
 - Windows PowerShell 5.1과 PowerShell 7 단위 테스트
@@ -51,9 +51,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\HermesEasySetup.ps1 `
 
 - 기본 `%LOCALAPPDATA%\hermes`에 코드, venv, managed Node/uv, 설정 템플릿과 Hermes 데이터 폴더 생성 또는 업데이트
 - `%LOCALAPPDATA%\hermes\hermes-agent\bin`을 사용자 PATH에 추가하고 `HERMES_HOME` 사용자 환경 변수 설정 또는 갱신
-- Python, Node, 기본 브라우저 도구와 시스템 도구 등 상류의 기본 CLI 의존성 다운로드
+- Python, managed uv와 후속 도구 설정을 위한 managed Node 등 core CLI 실행 기반 다운로드
 - 임의의 기존 checkout 채택·업데이트는 거부합니다. `-Resume`은 같은 마법사가 만든 동일 계획/manifest checkpoint와 v0.1.1 launcher attestation의 전체 정적 provenance가 함께 남은 경우에만 공식 idempotent 단계를 다시 적용합니다.
-- v0.1.1은 Computer Use 사전 설치와 Electron Desktop 빌드를 실행하지 않음
+- v0.1.1은 선택적 Browser/TUI npm 의존성 설치, Computer Use 사전 설치와 Electron Desktop 빌드를 실행하지 않음
 
 마법사의 캐시, 체크포인트와 로그는 별도 `%LOCALAPPDATA%\HermesEasySetup`에 저장됩니다. 백업·제거·강제 downgrade는 하지 않습니다. 처리된 실패는 새 PATH/HERMES_HOME 노출, exact fresh launcher, 이번 실행의 attestation과 launcher exclude 변경을 compare/CAS 방식으로 되돌리므로 보통 다음 `-Resume`에 필요한 attestation도 남지 않습니다. `-Resume`은 attestation 발급 뒤 프로세스가 비정상 종료되어 동일 계획/manifest의 Running 또는 Failed checkpoint와 attestation이 모두 살아남은 제한된 경우에만 허용됩니다. 그 밖의 기존 경로는 새 빈 InstallDir에서 다시 시작해야 하며, 기존 설치 경로를 직접 삭제하거나 초기화하기 전에는 진단 로그를 검토하세요.
 
