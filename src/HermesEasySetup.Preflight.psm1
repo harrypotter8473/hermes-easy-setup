@@ -292,6 +292,100 @@ function Get-HermesPreflight {
     }
 }
 
+function Test-HermesCompletedInstallForSetup {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]$Diagnosis,
+        [AllowNull()]$State,
+        [Parameter(Mandatory = $true)]$Paths,
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit
+    )
+
+    $newResult = {
+        param([bool]$Eligible, [string]$Reason)
+        return [pscustomobject]@{ Eligible = $Eligible; Reason = $Reason }
+    }
+    if ($null -eq $Diagnosis -or $null -eq $State -or $null -eq $Paths) {
+        return (& $newResult $false 'MissingEvidence')
+    }
+
+    try {
+        $diagnosisProperties = @($Diagnosis.PSObject.Properties.Name)
+        $pathProperties = @($Paths.PSObject.Properties.Name)
+        $stateProperties = @($State.PSObject.Properties.Name)
+        if (@('Ready', 'ExistingCheckout', 'ExistingCommand', 'ExistingOrigin', 'Paths') |
+            Where-Object { $diagnosisProperties -notcontains $_ }) {
+            return (& $newResult $false 'InvalidDiagnosis')
+        }
+        if (@('HermesHome', 'InstallDir', 'RuntimeRoot') | Where-Object { $pathProperties -notcontains $_ }) {
+            return (& $newResult $false 'InvalidPaths')
+        }
+        if (($Diagnosis.Ready -isnot [bool]) -or -not [bool]$Diagnosis.Ready -or
+            ($Diagnosis.ExistingCheckout -isnot [bool]) -or -not [bool]$Diagnosis.ExistingCheckout) {
+            return (& $newResult $false 'DiagnosisNotReady')
+        }
+        if (-not (Test-HermesOfficialGitOrigin -OriginUrl ([string]$Diagnosis.ExistingOrigin))) {
+            return (& $newResult $false 'OriginNotOfficial')
+        }
+
+        $normalizeDirectory = {
+            param([Parameter(Mandatory = $true)][string]$LiteralPath)
+            return ([System.IO.Path]::GetFullPath($LiteralPath)).TrimEnd([char[]]@('\', '/'))
+        }
+        $expectedHome = & $normalizeDirectory ([string]$Paths.HermesHome)
+        $expectedInstall = & $normalizeDirectory ([string]$Paths.InstallDir)
+        $expectedRuntime = & $normalizeDirectory ([string]$Paths.RuntimeRoot)
+        $diagnosisPaths = $Diagnosis.Paths
+        if ($null -eq $diagnosisPaths) { return (& $newResult $false 'InvalidDiagnosisPaths') }
+        $diagnosisPathProperties = @($diagnosisPaths.PSObject.Properties.Name)
+        if (@('HermesHome', 'InstallDir', 'RuntimeRoot') | Where-Object { $diagnosisPathProperties -notcontains $_ }) {
+            return (& $newResult $false 'InvalidDiagnosisPaths')
+        }
+        $diagnosisPathsMatch = (
+            [string]::Equals((& $normalizeDirectory ([string]$diagnosisPaths.HermesHome)), $expectedHome, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals((& $normalizeDirectory ([string]$diagnosisPaths.InstallDir)), $expectedInstall, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals((& $normalizeDirectory ([string]$diagnosisPaths.RuntimeRoot)), $expectedRuntime, [StringComparison]::OrdinalIgnoreCase)
+        )
+        if (-not $diagnosisPathsMatch) { return (& $newResult $false 'DiagnosisPathMismatch') }
+
+        $expectedCommand = [System.IO.Path]::GetFullPath((Join-Path ([string]$Paths.InstallDir) 'bin\hermes.exe'))
+        $diagnosedCommand = [System.IO.Path]::GetFullPath([string]$Diagnosis.ExistingCommand)
+        if (-not [string]::Equals($diagnosedCommand, $expectedCommand, [StringComparison]::OrdinalIgnoreCase)) {
+            return (& $newResult $false 'CommandPathMismatch')
+        }
+
+        $requiredStateProperties = @(
+            'schema_version', 'status', 'source_commit', 'hermes_home',
+            'install_dir', 'runtime_root', 'verification'
+        )
+        if ($requiredStateProperties | Where-Object { $stateProperties -notcontains $_ }) {
+            return (& $newResult $false 'InvalidState')
+        }
+        if ([int]$State.schema_version -ne 2 -or [string]$State.status -cne 'Completed' -or
+            -not [string]::Equals([string]$State.source_commit, $ExpectedCommit, [StringComparison]::OrdinalIgnoreCase)) {
+            return (& $newResult $false 'StateNotCompleted')
+        }
+        $statePathsMatch = (
+            [string]::Equals((& $normalizeDirectory ([string]$State.hermes_home)), $expectedHome, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals((& $normalizeDirectory ([string]$State.install_dir)), $expectedInstall, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals((& $normalizeDirectory ([string]$State.runtime_root)), $expectedRuntime, [StringComparison]::OrdinalIgnoreCase)
+        )
+        if (-not $statePathsMatch) { return (& $newResult $false 'StatePathMismatch') }
+
+        $verification = $State.verification
+        if ($null -eq $verification) { return (& $newResult $false 'InvalidVerification') }
+        $verificationProperties = @($verification.PSObject.Properties.Name)
+        if ($verificationProperties -notcontains 'verified' -or $verificationProperties -notcontains 'failed_checks' -or
+            ($verification.verified -isnot [bool]) -or -not [bool]$verification.verified -or
+            $null -eq $verification.failed_checks -or @($verification.failed_checks).Count -ne 0) {
+            return (& $newResult $false 'InvalidVerification')
+        }
+    } catch {
+        return (& $newResult $false 'MalformedEvidence')
+    }
+    return (& $newResult $true 'Eligible')
+}
+
 function New-HermesInstallPlan {
     [CmdletBinding()]
     param(
@@ -401,4 +495,5 @@ function New-HermesInstallPlan {
     }
 }
 
-Export-ModuleMember -Function 'Get-HermesCommandPath', 'Get-HermesPreflight', 'New-HermesInstallPlan'
+Export-ModuleMember -Function 'Get-HermesCommandPath', 'Get-HermesPreflight',
+    'Test-HermesCompletedInstallForSetup', 'New-HermesInstallPlan'

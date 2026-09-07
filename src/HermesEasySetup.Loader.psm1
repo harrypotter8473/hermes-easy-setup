@@ -7,6 +7,7 @@ $modules = @(
     'HermesEasySetup.Execution.psm1',
     'HermesEasySetup.Protocol.psm1',
     'HermesEasySetup.InstallEngine.psm1',
+    'HermesEasySetup.Lab.psm1',
     'HermesEasySetup.Bundle.psm1'
 )
 foreach ($module in $modules) {

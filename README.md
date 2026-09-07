@@ -6,9 +6,10 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 
 ## 현재 상태
 
-- 버전 `0.1.1` Windows 네이티브 MVP
-- 초기 범위는 Hermes CLI 설치·검증과 공식 설정 화면 연결까지입니다.
-- 선택적 Browser/TUI npm 의존성, Computer Use 사전 설치와 Hermes Desktop 자동 빌드는 후속 버전으로 미룹니다. GUI는 Computer Use/Desktop 옵션을 고정하며 CLI 설치에는 `-SkipComputerUse`가 필요합니다.
+- 버전 `0.2.0` Windows 네이티브 연구실 통합 MVP
+- 5단계 마법사에서 Hermes 설치·검증과 공식 provider/model 설정을 마친 뒤 새 프로필, Mattermost, NetBird Dashboard, 자동 시작 Gateway와 Bot Control 등록까지 이어서 구성합니다.
+- 이전 마법사가 남긴 exact `Completed` 설치 기록이 안전 조건을 충족하면 PC 확인 화면에서 재설치 없이 Portal/Full 공식 설정만 계속할 수 있습니다. 실제 설정 창을 열기 전 현재 설치를 다시 전체 검증합니다.
+- 선택적 Browser/TUI npm 의존성, Computer Use 사전 설치와 Hermes Desktop 자동 빌드는 후속 버전으로 미룹니다. v0.1.2 GUI는 Computer Use/Desktop 옵션을 고정하며 CLI 설치에는 `-SkipComputerUse`가 필요합니다.
 - Windows 10/11 x64에서 로컬 및 CI 검증
 - ARM64는 Hermes upstream Tier 1 대상이지만 이 마법사는 아직 실기기 미검증
 - Windows PowerShell 5.1과 PowerShell 7 단위 테스트
@@ -27,7 +28,11 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 4. `PC 확인` 결과를 읽습니다.
 5. 설치 옵션, 세 경로, tag 객체, peeled commit, 설치기와 manifest 해시를 검토합니다.
 6. 동의 체크박스를 직접 선택한 뒤 설치를 시작합니다.
-7. 설치가 끝나면 공식 `hermes setup --portal` 또는 `hermes setup` 화면에서 공급자를 설정합니다.
+7. CLI 설치 검증이 끝나면 Portal/Full 선택 시 마법사의 4단계에서 `공식 설정 시작`을 눌러 보이는 공식 `hermes setup --portal` 또는 `hermes setup` 콘솔을 엽니다. 공급자와 자격증명은 그 공식 창에만 직접 입력합니다.
+8. 마법사는 설정 프로세스가 끝날 때까지 창을 유지하지만, 종료 코드 0이나 창 닫힘만으로 공급자 설정이 완료되었다고 판정하지는 않습니다. 공식 Hermes 화면의 결과를 직접 확인하세요.
+9. 연구실 연결 계속을 눌러 프로필 이름·Full name·역할, Mattermost URL·봇 토큰, 허용 사용자·홈 채널, 응답 정책과 Dashboard 인증값을 입력합니다.
+10. 마법사가 NetBird IP를 감지하고 Dashboard Scheduled Task, 프로필 Gateway 자동 시작, Bot Control 자동 등록과 최종 상태를 검증합니다.
+11. v0.1.1 화면에서 설치 검증 로그는 성공했지만 마지막에 실패로 표시된 PC라면 `PC 확인`을 다시 실행하세요. 완료 기록·official origin·pin·경로가 모두 맞으면 `기존 설치 설정 계속`이 나타납니다.
 
 관리자 권한은 기본적으로 필요하지 않습니다. Windows가 미서명 스크립트 경고를 보인다면 출처와 체크섬을 먼저 확인하세요. 경고를 우회하도록 자동 설정을 바꾸지는 마세요.
 
@@ -45,6 +50,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\HermesEasySetup.ps1 `
   -Action Install -Apply -SkipComputerUse
 ```
 
+## 연구실 연결 단계
+
+- 기본 프로필의 provider/model 설정·자격증명·도구·skills를 복제하되 새 이름과 역할로 SOUL을 만들며 대화 기록과 메모리는 복제하지 않습니다.
+- 복제된 프로필에서 기존 Mattermost·Slack·Discord 등 메시징 연결값을 제거하고 입력한 Mattermost 값만 저장합니다.
+- Dashboard는 감지된 NetBird IPv4와 지정 포트에 바인딩되며, Windows 로그인 시 숨김 Scheduled Task로 자동 시작합니다.
+- 새 프로필 Gateway는 프로필별 Scheduled Task로 설치하고 즉시 시작합니다.
+- Mattermost 봇 토큰은 Bot Control 등록 요청의 Bearer 인증에만 사용하고 마법사 로그·명령행·등록 데이터에 저장하지 않습니다.
+- GUI에서 worker로 넘기는 봇 토큰과 Dashboard 비밀번호는 Windows DPAPI CurrentUser로 암호화한 임시 파일을 사용하며 작업 종료 시 삭제합니다.
+- Bot Control 0.6.0 이상이 설치되어 있어야 자동 등록이 성공합니다. Mattermost 서버에서 해당 NetBird Dashboard URL에 접근할 수 없으면 등록 단계에서 중단합니다.
+
 ## 예상되는 시스템 변경
 
 승인 뒤 공식 Hermes 설치기는 다음 작업을 할 수 있습니다.
@@ -52,8 +67,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\HermesEasySetup.ps1 `
 - 기본 `%LOCALAPPDATA%\hermes`에 코드, venv, managed Node/uv, 설정 템플릿과 Hermes 데이터 폴더 생성 또는 업데이트
 - `%LOCALAPPDATA%\hermes\hermes-agent\bin`을 사용자 PATH에 추가하고 `HERMES_HOME` 사용자 환경 변수 설정 또는 갱신
 - Python, managed uv와 후속 도구 설정을 위한 managed Node 등 core CLI 실행 기반 다운로드
-- 임의의 기존 checkout 채택·업데이트는 거부합니다. `-Resume`은 같은 마법사가 만든 동일 계획/manifest checkpoint와 v0.1.1 launcher attestation의 전체 정적 provenance가 함께 남은 경우에만 공식 idempotent 단계를 다시 적용합니다.
-- v0.1.1은 선택적 Browser/TUI npm 의존성 설치, Computer Use 사전 설치와 Electron Desktop 빌드를 실행하지 않음
+- 임의의 기존 checkout 채택·업데이트는 거부합니다. `-Resume`은 같은 마법사가 만든 동일 계획/manifest checkpoint와 launcher attestation v1의 전체 정적 provenance가 함께 남은 경우에만 공식 idempotent 단계를 다시 적용합니다.
+- v0.1.2는 선택적 Browser/TUI npm 의존성 설치, Computer Use 사전 설치와 Electron Desktop 빌드를 실행하지 않음
 
 마법사의 캐시, 체크포인트와 로그는 별도 `%LOCALAPPDATA%\HermesEasySetup`에 저장됩니다. 백업·제거·강제 downgrade는 하지 않습니다. 처리된 실패는 새 PATH/HERMES_HOME 노출, exact fresh launcher, 이번 실행의 attestation과 launcher exclude 변경을 compare/CAS 방식으로 되돌리므로 보통 다음 `-Resume`에 필요한 attestation도 남지 않습니다. `-Resume`은 attestation 발급 뒤 프로세스가 비정상 종료되어 동일 계획/manifest의 Running 또는 Failed checkpoint와 attestation이 모두 살아남은 제한된 경우에만 허용됩니다. 그 밖의 기존 경로는 새 빈 InstallDir에서 다시 시작해야 하며, 기존 설치 경로를 직접 삭제하거나 초기화하기 전에는 진단 로그를 검토하세요.
 
@@ -71,8 +86,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\HermesEasySetup.ps1 `
 10. fresh repository 직후 clean proof를 만들고 path 단계가 만든 정확한 PE launcher 두 개만 `.git/info/exclude`에 등록한 뒤, commit·설치기 digest·경로·launcher hash를 RuntimeRoot의 canonical attestation에 묶습니다.
 11. repository-aware Git 실행 전 raw `.git/config` 허용 목록, `commondir`, `config.worktree`, active `info/attributes`, alternates를 파일 I/O로 검사하고, hooks/fsmonitor/system·global 설정을 격리합니다.
 12. Hermes 코드를 실행하기 전에 attestation과 launcher를 다시 읽고 marker, raw origin, top-level/git-dir, HEAD/index tree, index flags와 clean status를 모두 확인합니다.
+13. 검증된 CLI 설치 상태를 확정한 뒤 Portal/Full 선택에서만 별도 보이는 공식 설정 콘솔을 열고, 설치 worker와 구분된 설정 상태로 프로세스 종료를 추적합니다.
 
 실행되는 기본 단계에는 종류에 따라 30분 또는 90분의 상한이 있으며 timeout 시 해당 프로세스 트리를 종료합니다. path snapshot 이후 후속 단계나 최종 Verify가 실패해도 PATH/HERMES_HOME, exact launcher, attestation과 이번 실행의 exclude 변경은 각각 독립적으로 복구를 시도합니다. checkout, 다운로드된 dependencies와 실패 checkpoint까지 되돌리는 제거·트랜잭션 기능은 아닙니다.
+
+설치 상태와 설정 상태는 서로 다른 결과입니다. `설치 완료`는 고정 provenance와 CLI 실행 검증이 성공했다는 뜻이고, `설정 창 종료`는 공식 설정 프로세스가 끝났다는 뜻일 뿐 공급자·API 키·포털 연결이 실제로 저장되었다는 증거는 아닙니다. 설정 콘솔의 stdin/stdout/stderr와 사용자가 입력한 자격증명은 마법사의 worker transport, 작업 로그와 진단 ZIP으로 가져오지 않습니다.
 
 ## 보존 원칙
 
@@ -100,7 +118,7 @@ fresh clone은 RuntimeRoot의 빈 global attributes/excludes와 `core.autocrlf=f
 
 현재 안전 경계에서는 [공식 Git for Windows](https://gitforwindows.org/)가 Program Files에 미리 설치되어 있어야 합니다. 공식 Hermes 설치기의 해시 미고정 portable Git 다운로드 경로는 실행하지 않습니다.
 
-v0.1.1은 상류 설치기의 경로 표기 변환과 wrapper의 복구 계약이 어긋나지 않도록 DOS 8.3 짧은 경로(`FIRSTL~1` 형태)를 거부합니다. 기본 GUI 경로나 직접 지정하는 긴 절대 경로를 사용하세요.
+v0.1.x는 상류 설치기의 경로 표기 변환과 wrapper의 복구 계약이 어긋나지 않도록 DOS 8.3 짧은 경로(`FIRSTL~1` 형태)를 거부합니다. 기본 GUI 경로나 직접 지정하는 긴 절대 경로를 사용하세요.
 
 공식 설치 스크립트가 이후 받는 Python, Node, 시스템 패키지 등 모든 전이 산출물의 완전한 재현성까지 보장하지는 않습니다. 자세한 내용은 [SECURITY.md](SECURITY.md)를 참고하세요.
 
@@ -112,7 +130,8 @@ v0.1.1은 상류 설치기의 경로 표기 변환과 wrapper의 복구 계약�
 | `Plan` | 고정 소스와 변경 계획 표시 | 없음 |
 | `Install` | 공식 비대화형 단계 실행 | `-Apply` 필요 |
 | `Verify` | 대상 설치와 고정 commit 확인 | 없음 |
-| `Setup` | 보이는 공식 설정 프로세스 시작 | 사용자 입력에 따라 변경 |
+| `Setup` | 보이는 공식 설정 프로세스 시작·종료 추적(구성 완료 판정 아님) | 사용자 입력에 따라 변경 |
+| `LabSetup` | 암호화된 GUI 입력으로 프로필·Mattermost·Dashboard·Gateway·Bot Control 등록 구성 | `-Apply` 필요 |
 | `Bundle` | 정제된 로컬 진단 ZIP 생성 | 마법사 진단 폴더만 |
 
 주요 종료 코드는 `0` 성공, `2` 승인/인수/재개 오류, `10` 사전 점검 실패, `20` 소스 검증 실패, `30` protocol 불일치, `40` 설치 단계 실패, `50` 최종 검증 실패입니다.
@@ -129,7 +148,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-SecurityTest
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Run-GuiTests.ps1
 ```
 
-상류 tag→commit→blob, base manifest와 Desktop manifest의 drift만 다시 확인하려면 다음을 실행합니다. Hermes 설치 단계는 0개 실행되며 Desktop manifest 확인은 v0.1.1의 Desktop 설치 지원을 의미하지 않습니다.
+상류 tag→commit→blob, base manifest와 Desktop manifest의 drift만 다시 확인하려면 다음을 실행합니다. Hermes 설치 단계는 0개 실행되며 Desktop manifest 확인은 v0.1.2의 Desktop 설치 지원을 의미하지 않습니다.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-UpstreamContractSmoke.ps1

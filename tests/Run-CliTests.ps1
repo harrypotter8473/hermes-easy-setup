@@ -42,13 +42,13 @@ try {
     $computerUseOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SetupMode Later -Json)
     $computerUseExit = $LASTEXITCODE
     $computerUseError = $computerUseOutput[-1] | ConvertFrom-Json
-    Assert-CliTrue ($computerUseExit -eq 10 -and [int]$computerUseError.exit_code -eq 10 -and [string]$computerUseError.message -like '*Computer Use*') 'v0.1.1 fails closed before automatic Computer Use bootstrap'
+    Assert-CliTrue ($computerUseExit -eq 10 -and [int]$computerUseError.exit_code -eq 10 -and [string]$computerUseError.message -like '*Computer Use*') 'v0.1.2 fails closed before automatic Computer Use bootstrap'
     Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) 'Computer Use policy rejection precedes runtime mutation'
 
     $desktopOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -IncludeDesktop -SetupMode Later -Json)
     $desktopExit = $LASTEXITCODE
     $desktopError = $desktopOutput[-1] | ConvertFrom-Json
-    Assert-CliTrue ($desktopExit -eq 10 -and [int]$desktopError.exit_code -eq 10 -and [string]$desktopError.message -like '*Desktop*') 'v0.1.1 scope is limited to the base Hermes CLI install'
+    Assert-CliTrue ($desktopExit -eq 10 -and [int]$desktopError.exit_code -eq 10 -and [string]$desktopError.message -like '*Desktop*') 'v0.1.2 scope is limited to the base Hermes CLI install'
     Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) 'Desktop policy rejection precedes runtime mutation'
 
     $mismatchOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -SetupMode Later -ExpectedPlanFingerprint ('0' * 64) -Json)

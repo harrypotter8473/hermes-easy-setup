@@ -343,7 +343,7 @@ function Get-HermesMvpPolicyStageSkipReason {
     param([Parameter(Mandatory = $true)][string]$Stage)
 
     if ($Stage -ceq 'node-deps') {
-        return 'v0.1.1 초기판은 core Hermes CLI만 설치하므로 선택적 Browser/TUI npm 의존성은 후속 버전까지 자동 실행하지 않습니다.'
+        return 'v0.1.2 초기판은 core Hermes CLI만 설치하므로 선택적 Browser/TUI npm 의존성은 후속 버전까지 자동 실행하지 않습니다.'
     }
     return $null
 }
@@ -2789,10 +2789,10 @@ function Invoke-HermesInstall {
         Throw-HermesEasySetupError -Message '승인한 설치 계획과 현재 실행 계획이 다릅니다. 계획을 다시 검토하고 승인하세요.' -ExitCode 2 -Category 'PlanApproval'
     }
     if (-not [bool]$SkipComputerUse) {
-        Throw-HermesEasySetupError -Message 'v0.1.1은 격리 프로필 밖에 PATH·작업 스케줄러 변경을 남기는 상류 Computer Use bootstrap을 자동 실행하지 않습니다. -SkipComputerUse를 지정하고 설치 후 Hermes의 공식 도구 설정에서 별도로 검토하세요.' -ExitCode 10 -Category 'Preflight'
+        Throw-HermesEasySetupError -Message 'v0.1.2는 격리 프로필 밖에 PATH·작업 스케줄러 변경을 남기는 상류 Computer Use bootstrap을 자동 실행하지 않습니다. -SkipComputerUse를 지정하고 설치 후 Hermes의 공식 도구 설정에서 별도로 검토하세요.' -ExitCode 10 -Category 'Preflight'
     }
     if ([bool]$IncludeDesktop) {
-        Throw-HermesEasySetupError -Message 'v0.1.1 초기판은 기본 Hermes CLI 설치만 지원합니다. Desktop 자동 빌드는 후속 버전에서 별도 검증 후 제공할 예정입니다.' -ExitCode 10 -Category 'Preflight'
+        Throw-HermesEasySetupError -Message 'v0.1.2 초기판은 기본 Hermes CLI 설치만 지원합니다. Desktop 자동 빌드는 후속 버전에서 별도 검증 후 제공할 예정입니다.' -ExitCode 10 -Category 'Preflight'
     }
     [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'plan' -State 'ready' -Message "검증 릴리스 $($plan.SourceTag), peeled commit $($plan.SourceCommit.Substring(0, 12))" -Percent 1 -Data $plan)
 
@@ -2843,7 +2843,7 @@ function Invoke-HermesInstall {
         $lock = Enter-HermesInstallLock -RuntimeRoot $paths.RuntimeRoot
         if ($preflight.ExistingCheckout) {
             if (-not $Resume) {
-                Throw-HermesEasySetupError -Message '기존 checkout은 v0.1.1 attestation이 있는 실패 상태의 -Resume만 허용합니다. 새 빈 InstallDir에서 다시 설치하세요.' -ExitCode 10 -Category 'Preflight'
+                Throw-HermesEasySetupError -Message '기존 checkout은 launcher attestation v1이 있는 실패 상태의 -Resume만 허용합니다. 새 빈 InstallDir에서 다시 설치하세요.' -ExitCode 10 -Category 'Preflight'
             }
             $existingGate = Test-HermesInstallation -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir -RuntimeRoot $paths.RuntimeRoot -ExpectedCommit ([string]$sourceConfig.hermes.commitSha) -ExpectedInstallerSha256 ([string]$sourceConfig.installer.sha256) -StaticOnly -LogPath $logPath
             if (-not $existingGate.StaticProvenanceValid) {
@@ -3124,7 +3124,17 @@ function Start-HermesOfficialSetup {
         [switch]$Wait
     )
 
-    if ($Mode -eq 'Later') { return [pscustomobject]@{ Started = $false; Reason = 'Later' } }
+    if ($Mode -eq 'Later') {
+        return [pscustomobject]@{
+            Started = $false
+            Exited = $false
+            ExitCode = $null
+            ProcessId = $null
+            Mode = 'Later'
+            Command = $null
+            Reason = 'Later'
+        }
+    }
     $paths = Get-HermesDefaultPaths -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot
     $verification = Test-HermesInstallation -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir -RuntimeRoot $paths.RuntimeRoot
     if (-not $verification.Verified -or [string]::IsNullOrWhiteSpace([string]$verification.CommandPath)) {
@@ -3152,8 +3162,32 @@ function Start-HermesOfficialSetup {
             $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
             [Environment]::SetEnvironmentVariable($name, $setupEnvironment[$name], [EnvironmentVariableTarget]::Process)
         }
-        $process = Start-Process -FilePath $command -ArgumentList $arguments -PassThru -Wait:$Wait -WindowStyle Normal
-        return [pscustomobject]@{ Started = $true; ProcessId = $process.Id; Mode = $Mode; Command = $command }
+        $process = $null
+        try {
+            # Do not redirect the official child's streams: prompts and credentials stay
+            # exclusively in its visible console. Cache the process handle before waiting
+            # so Windows PowerShell 5.1 can read ExitCode reliably after process exit.
+            $process = Start-Process -FilePath $command -ArgumentList $arguments -PassThru -WindowStyle Normal
+            $processId = [int]$process.Id
+            [void]$process.Handle
+            $exited = $false
+            $exitCode = $null
+            if ($Wait) {
+                $process.WaitForExit()
+                $exited = $true
+                $exitCode = [int]$process.ExitCode
+            }
+            return [pscustomobject]@{
+                Started = $true
+                Exited = $exited
+                ExitCode = $exitCode
+                ProcessId = $processId
+                Mode = $Mode
+                Command = $command
+            }
+        } finally {
+            if ($null -ne $process) { $process.Dispose() }
+        }
     } finally {
         foreach ($name in $previousEnvironment.Keys) {
             [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], [EnvironmentVariableTarget]::Process)

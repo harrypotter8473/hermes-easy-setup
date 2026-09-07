@@ -53,7 +53,7 @@ path snapshot 뒤 후속 stage 또는 최종 Verify가 실패하면 PATH/HERMES_
 
 ## 보장 범위 밖
 
-- v0.1.1의 선택적 Browser/TUI npm 의존성 설치, Computer Use 사전 설치와 Hermes Desktop 자동 빌드
+- v0.1.2의 선택적 Browser/TUI npm 의존성 설치, Computer Use 사전 설치와 Hermes Desktop 자동 빌드
 - DOS 8.3 짧은 경로 표기 지원(긴 절대 경로를 사용해야 함)
 - 공식 설치기가 받는 모든 전이 의존성의 완전한 고정·재현 빌드
 - launcher attestation 바깥의 전체 venv·Python/Node 패키지 진위
@@ -62,7 +62,8 @@ path snapshot 뒤 후속 stage 또는 최종 Verify가 실패하면 PATH/HERMES_
 - Windows 자체, GitHub, 패키지 registry 또는 upstream Hermes의 compromise
 - 코드 서명되지 않은 이 마법사 소스의 publisher identity
 - regex/best-effort 정제가 모든 종류의 새 비밀 형식을 제거한다는 보장
-- 사용자가 공식 설정 화면에 직접 입력한 공급자 자격증명의 관리
+- 사용자가 공식 설정 화면에 직접 입력한 공급자 자격증명의 저장·검증·관리
+- 공식 setup 프로세스의 종료 코드 0 또는 창 닫힘만으로 공급자 구성이 완료되었다고 증명하는 것
 - repository clone 중 user-global에만 정의된 기업 프록시, 사설 CA 또는 credential helper
 - Program Files에 공식 Git for Windows가 없는 환경의 자동 Git 부트스트랩
 
@@ -71,6 +72,14 @@ path snapshot 뒤 후속 stage 또는 최종 Verify가 실패하면 PATH/HERMES_
 ## 사용자 데이터
 
 마법사는 `.env`, `config.yaml`, 인증 데이터, skills, sessions, memories, messages와 그 밖의 Hermes 사용자 콘텐츠를 직접 수집하거나 삭제하지 않습니다. 제거 기능이 없는 것도 같은 이유입니다.
+
+v0.2.0의 4단계는 검증된 설치 뒤 Portal/Full을 선택한 사용자가 명시적으로 시작한 공식 Hermes setup을 별도의 보이는 콘솔에서 실행합니다. 사용자의 키보드 입력과 provider 자격증명, setup의 stdin/stdout/stderr는 그 공식 창에만 남고 install worker transport, 마법사 로그와 진단 ZIP에는 수집하지 않습니다. 마법사는 setup 프로세스의 시작과 종료만 추적하며, 그 상태를 검증된 CLI 설치 상태와 합치지 않습니다.
+
+5단계 연구실 연결 입력은 별도 경계입니다. GUI는 Mattermost 봇 토큰과 Dashboard 비밀번호를 Windows DPAPI CurrentUser로 암호화한 임시 파일로 worker에 전달하고 명령행·이벤트·로그에는 넣지 않습니다. worker는 토큰을 Mattermost Bearer 인증에만 사용하고 작업 뒤 암호화 임시 파일을 삭제합니다.
+
+운영을 위해 Dashboard 비밀번호는 Hermes의 `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` 값과 Bot Control 플러그인 KV에 저장됩니다. 이는 NetBird 내부에서 Bot Control이 Dashboard에 다시 로그인하기 위한 의도된 저장이며, 봇 토큰은 Bot Control에 저장하지 않습니다. 따라서 Hermes home과 Mattermost 데이터베이스·플러그인 KV에 접근할 수 있는 관리자는 Dashboard 자격증명에도 접근할 수 있다는 위협 모델을 적용해야 합니다.
+
+기존 `Completed` 기록에서 설정만 계속하는 버튼은 진단 Ready, exact official origin·managed command 경로, 현재 pin, 상태 경로와 성공 verification이 모두 일치할 때만 표시됩니다. 버튼과 상태 파일은 실행 허가가 아니며, 공식 setup child는 현재 설치의 전체 provenance와 CLI 실행 검증을 다시 통과한 뒤에만 시작됩니다.
 
 진단 번들은 마법사 자체의 사전 점검 요약, 고정 소스 요약, 정제된 상태와 최근 정제 로그만 허용 목록 방식으로 포함합니다. 알려진 사용자 프로필, Hermes, 설치 및 runtime 경로를 placeholder로 바꾸지만 OS 버전과 일반 환경 정보는 남을 수 있습니다.
 

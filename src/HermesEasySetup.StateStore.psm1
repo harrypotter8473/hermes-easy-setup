@@ -150,6 +150,89 @@ function Reset-HermesStateForSafeResume {
     return $State
 }
 
+function Resolve-HermesInstallWorkerOutcome {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][Nullable[int]]$ExitCode,
+        [Parameter(Mandatory = $true)][bool]$ExitCodeAvailable,
+        [AllowNull()]$CompletionData,
+        [AllowNull()]$State,
+        [Parameter(Mandatory = $true)][string]$ExpectedPlanFingerprint
+    )
+
+    $usedFallback = (-not $ExitCodeAvailable -or $null -eq $ExitCode)
+    $newOutcome = {
+        param([bool]$Succeeded, [string]$Reason)
+        return [pscustomobject]@{
+            Succeeded = $Succeeded
+            Reason = $Reason
+            ExitCodeAvailable = $ExitCodeAvailable
+            ExitCode = $(if ($null -eq $ExitCode) { $null } else { [int]$ExitCode })
+            UsedFallback = $usedFallback
+        }
+    }.GetNewClosure()
+
+    if ($ExitCodeAvailable -and $null -ne $ExitCode -and [int]$ExitCode -ne 0) {
+        return (& $newOutcome $false 'KnownNonZeroExit')
+    }
+    if ($null -eq $CompletionData) {
+        return (& $newOutcome $false 'MissingCompletionData')
+    }
+
+    try {
+        $completionProperties = @($CompletionData.PSObject.Properties.Name)
+        $completionValid = (
+            $completionProperties -contains 'Installed' -and
+            $completionProperties -contains 'Verified' -and
+            $completionProperties -contains 'FailedChecks' -and
+            ($CompletionData.Installed -is [bool]) -and
+            ($CompletionData.Verified -is [bool]) -and
+            [bool]$CompletionData.Installed -and
+            [bool]$CompletionData.Verified -and
+            $null -ne $CompletionData.FailedChecks -and
+            @($CompletionData.FailedChecks).Count -eq 0
+        )
+    } catch {
+        $completionValid = $false
+    }
+    if (-not $completionValid) {
+        return (& $newOutcome $false 'InvalidCompletionData')
+    }
+    if ($null -eq $State) {
+        return (& $newOutcome $false 'MissingState')
+    }
+
+    try {
+        $stateProperties = @($State.PSObject.Properties.Name)
+        $verification = $(if ($stateProperties -contains 'verification') { $State.verification } else { $null })
+        $verificationProperties = $(if ($null -eq $verification) { @() } else { @($verification.PSObject.Properties.Name) })
+        $stateValid = (
+            -not [string]::IsNullOrWhiteSpace($ExpectedPlanFingerprint) -and
+            $stateProperties -contains 'schema_version' -and
+            $stateProperties -contains 'status' -and
+            $stateProperties -contains 'plan_fingerprint' -and
+            $stateProperties -contains 'verification' -and
+            [int]$State.schema_version -eq 2 -and
+            [string]$State.status -ceq 'Completed' -and
+            [string]$State.plan_fingerprint -ceq $ExpectedPlanFingerprint -and
+            $null -ne $verification -and
+            $verificationProperties -contains 'verified' -and
+            $verificationProperties -contains 'failed_checks' -and
+            ($verification.verified -is [bool]) -and
+            [bool]$verification.verified -and
+            $null -ne $verification.failed_checks -and
+            @($verification.failed_checks).Count -eq 0
+        )
+    } catch {
+        $stateValid = $false
+    }
+    if (-not $stateValid) {
+        return (& $newOutcome $false 'InvalidState')
+    }
+
+    return (& $newOutcome $true 'VerifiedCompletionAndState')
+}
+
 function Enter-HermesInstallLock {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$RuntimeRoot)
@@ -173,5 +256,6 @@ function Exit-HermesInstallLock {
 Export-ModuleMember -Function @(
     'Read-HermesInstallState', 'Save-HermesInstallState', 'New-HermesInstallState',
     'Get-HermesStageRecord', 'Set-HermesStageRecord', 'Test-HermesStateCanResume',
-    'Reset-HermesStateForSafeResume', 'Enter-HermesInstallLock', 'Exit-HermesInstallLock'
+    'Reset-HermesStateForSafeResume', 'Resolve-HermesInstallWorkerOutcome',
+    'Enter-HermesInstallLock', 'Exit-HermesInstallLock'
 )

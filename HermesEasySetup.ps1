@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Diagnose', 'Plan', 'Install', 'Verify', 'Setup', 'Bundle')]
+    [ValidateSet('Diagnose', 'Plan', 'Install', 'Verify', 'Setup', 'LabSetup', 'Bundle')]
     [string]$Action = 'Diagnose',
     [string]$HermesHome,
     [string]$InstallDir,
@@ -12,11 +12,13 @@ param(
     [switch]$Resume,
     [switch]$ForceDownload,
     [switch]$LaunchSetup,
+    [switch]$WaitForSetup,
     [switch]$Json,
     [switch]$JsonEvents,
     [string]$ExpectedPlanFingerprint,
     [string]$DestinationPath,
-    [string]$SourceConfigPath
+    [string]$SourceConfigPath,
+    [string]$LabInputPath
 )
 
 Set-StrictMode -Version 2.0
@@ -33,6 +35,24 @@ function Write-ResultObject {
     } else {
         $Value | Format-List | Out-Host
     }
+}
+
+function Write-SetupEvent {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('starting', 'closed')][string]$State,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [Parameter(Mandatory = $true)][AllowNull()]$Data
+    )
+
+    if (-not $JsonEvents) { return }
+    $event = [ordered]@{
+        type = 'setup'
+        timestamp = (Get-Date).ToUniversalTime().ToString('o')
+        state = $State
+        message = $Message
+        data = $Data
+    }
+    Write-ResultObject ([pscustomobject]$event)
 }
 
 $eventCallback = {
@@ -87,7 +107,7 @@ try {
             if (-not [string]::IsNullOrWhiteSpace($SourceConfigPath)) { $installArguments.SourceConfigPath = $SourceConfigPath }
             $result = Invoke-HermesInstall @installArguments
             if ($LaunchSetup -and $SetupMode -ne 'Later') {
-                $result | Add-Member -NotePropertyName SetupLaunch -NotePropertyValue (Start-HermesOfficialSetup -HermesHome $result.Plan.HermesHome -InstallDir $result.Plan.InstallDir -RuntimeRoot $result.Plan.RuntimeRoot -Mode $SetupMode)
+                $result | Add-Member -NotePropertyName SetupLaunch -NotePropertyValue (Start-HermesOfficialSetup -HermesHome $result.Plan.HermesHome -InstallDir $result.Plan.InstallDir -RuntimeRoot $result.Plan.RuntimeRoot -Mode $SetupMode -Wait:$WaitForSetup)
             }
             if (-not $JsonEvents) { Write-ResultObject $result }
         }
@@ -96,7 +116,79 @@ try {
             Write-ResultObject $result
             if (-not $result.Verified) { exit $exitCodes.VerificationFailed }
         }
-        'Setup' { Write-ResultObject (Start-HermesOfficialSetup -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot -Mode $SetupMode) }
+        'Setup' {
+            Write-SetupEvent -State 'starting' -Message '현재 Hermes 설치를 검증하고 공식 설정 창을 여는 중입니다.' -Data $null
+            $setupResult = Start-HermesOfficialSetup -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot -Mode $SetupMode -Wait:$WaitForSetup
+            if ($JsonEvents) {
+                if ($WaitForSetup) {
+                    $setupEventData = [pscustomobject][ordered]@{
+                        Started = [bool]$setupResult.Started
+                        Exited = [bool]$setupResult.Exited
+                        ExitCode = $setupResult.ExitCode
+                        Mode = [string]$setupResult.Mode
+                        ProcessId = $setupResult.ProcessId
+                    }
+                    Write-SetupEvent -State 'closed' -Message '공식 Hermes 설정 창이 닫혔습니다. 설정 완료 여부는 이 마법사에서 확인하지 않았습니다.' -Data $setupEventData
+                }
+            } else {
+                Write-ResultObject $setupResult
+            }
+        }
+        'LabSetup' {
+            if (-not $Apply) {
+                throw (New-Object System.InvalidOperationException '연구실 연결 변경을 승인하려면 -Apply를 함께 지정하세요.')
+            }
+            if ([string]::IsNullOrWhiteSpace($LabInputPath)) {
+                throw '암호화된 연구실 연결 입력 파일이 필요합니다.'
+            }
+            $paths = Get-HermesDefaultPaths -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot
+            $inputPath = [System.IO.Path]::GetFullPath($LabInputPath)
+            $transportRoot = [System.IO.Path]::GetFullPath((Join-Path $paths.RuntimeRoot 'ui-transport'))
+            if (-not (Test-HermesPathContains -ParentPath $transportRoot -ChildPath $inputPath)) {
+                throw '연구실 연결 입력 파일은 마법사 런타임 transport 폴더 안에 있어야 합니다.'
+            }
+            try {
+                $input = Unprotect-HermesLabInput -LiteralPath $inputPath
+                $arguments = @{
+                    HermesHome = $paths.HermesHome
+                    InstallDir = $paths.InstallDir
+                    RuntimeRoot = $paths.RuntimeRoot
+                    ProfileName = [string]$input.ProfileName
+                    FullName = [string]$input.FullName
+                    Role = [string]$input.Role
+                    MattermostURL = [string]$input.MattermostURL
+                    MattermostToken = [string]$input.MattermostToken
+                    AllowedUserIDs = [string]$input.AllowedUserIDs
+                    HomeChannelID = [string]$input.HomeChannelID
+                    RequireMention = [bool]$input.RequireMention
+                    ReplyMode = [string]$input.ReplyMode
+                    NetBirdIP = [string]$input.NetBirdIP
+                    DashboardPort = [int]$input.DashboardPort
+                    DashboardUsername = [string]$input.DashboardUsername
+                    DashboardPassword = [string]$input.DashboardPassword
+                    ReuseExistingProfile = [bool]$input.ReuseExistingProfile
+                    ProgressCallback = $eventCallback
+                }
+                $result = Invoke-HermesLabSetup @arguments
+                if ($JsonEvents) {
+                    & $eventCallback ([pscustomobject][ordered]@{
+                        type = 'complete'
+                        timestamp = (Get-Date).ToUniversalTime().ToString('o')
+                        stage = 'lab-setup'
+                        state = 'succeeded'
+                        percent = 100
+                        message = '연구실 Hermes 연결과 검증이 완료되었습니다.'
+                        data = $result
+                    })
+                } else {
+                    Write-ResultObject $result
+                }
+            } finally {
+                if (Test-Path -LiteralPath $inputPath -PathType Leaf) {
+                    Remove-Item -LiteralPath $inputPath -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
         'Bundle' {
             $arguments = @{ HermesHome = $HermesHome; InstallDir = $InstallDir; RuntimeRoot = $RuntimeRoot; DestinationPath = $DestinationPath }
             if (-not [string]::IsNullOrWhiteSpace($SourceConfigPath)) { $arguments.SourceConfigPath = $SourceConfigPath }

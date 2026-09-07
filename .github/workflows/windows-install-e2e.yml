@@ -56,7 +56,7 @@ jobs:
           $planText = & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Plan -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -SetupMode Later -Json
           if ($LASTEXITCODE -ne 0) { throw "Plan failed with exit code $LASTEXITCODE" }
           $plan = $planText | ConvertFrom-Json
-          if (-not [bool]$plan.SkipComputerUse -or [bool]$plan.IncludeDesktop -or [string]$plan.SetupMode -cne 'Later') { throw 'Plan is outside the v0.1.1 base CLI scope.' }
+          if (-not [bool]$plan.SkipComputerUse -or [bool]$plan.IncludeDesktop -or [string]$plan.SetupMode -cne 'Later') { throw 'Plan is outside the v0.1.2 base CLI scope.' }
 
           $computerUseOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SetupMode Later -Json)
           if ($LASTEXITCODE -ne 10) { throw 'Computer Use bootstrap was not rejected before install.' }
@@ -211,7 +211,7 @@ jobs:
           $gatewayState = @($finalState.stages | Where-Object { [string]$_.name -eq 'gateway' })
           $nodeDepsState = @($finalState.stages | Where-Object { [string]$_.name -eq 'node-deps' })
           $desktopState = @($finalState.stages | Where-Object { [string]$_.name -eq 'desktop' })
-          if ([string]$finalState.status -cne 'Completed' -or $configureState.Count -ne 1 -or [string]$configureState[0].status -cne 'Skipped' -or $gatewayState.Count -ne 1 -or [string]$gatewayState[0].status -cne 'Skipped' -or $nodeDepsState.Count -ne 1 -or [string]$nodeDepsState[0].status -cne 'Skipped' -or [string]$nodeDepsState[0].reason -notlike '*Browser/TUI*' -or $desktopState.Count -ne 0) { throw 'Final state is outside the v0.1.1 base CLI scope.' }
+          if ([string]$finalState.status -cne 'Completed' -or $configureState.Count -ne 1 -or [string]$configureState[0].status -cne 'Skipped' -or $gatewayState.Count -ne 1 -or [string]$gatewayState[0].status -cne 'Skipped' -or $nodeDepsState.Count -ne 1 -or [string]$nodeDepsState[0].status -cne 'Skipped' -or [string]$nodeDepsState[0].reason -notlike '*Browser/TUI*' -or $desktopState.Count -ne 0) { throw 'Final state is outside the v0.1.2 base CLI scope.' }
           if (@($attestation.managedCommands | Where-Object { @('browser-use', 'cua-driver') -contains [string]$_.command }).Count -ne 0) { throw 'Deferred browser or Computer Use command was unexpectedly attested.' }
           foreach ($deferredArtifact in @((Join-Path $hermesHome 'bin\browser-use.exe'), (Join-Path $installDir 'node_modules'), (Join-Path $installDir 'ui-tui\node_modules'))) {
             if (Test-Path -LiteralPath $deferredArtifact) { throw "Deferred node-deps artifact exists: $deferredArtifact" }

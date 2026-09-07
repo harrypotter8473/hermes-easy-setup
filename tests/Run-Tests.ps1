@@ -87,6 +87,166 @@ try {
     Assert-True ($trailingPaths.HermesHome -ceq $planA.HermesHome -and $trailingPaths.InstallDir -ceq $planA.InstallDir -and $trailingPaths.RuntimeRoot -ceq $planA.RuntimeRoot -and $rootPaths.HermesHome -ceq 'C:\') 'directory paths remove trailing separators without corrupting drive roots'
     Assert-Equal $planA.Fingerprint $planB.Fingerprint 'plan fingerprint deterministic'
     Assert-True ($planA.Fingerprint -ne $planC.Fingerprint) 'material option changes fingerprint'
+    $existingSetupPaths = [pscustomobject]@{
+        HermesHome = $planA.HermesHome
+        InstallDir = $planA.InstallDir
+        RuntimeRoot = $planA.RuntimeRoot
+    }
+    $eligibleDiagnosis = [pscustomobject]@{
+        Ready = $true
+        ExistingCheckout = $true
+        ExistingCommand = (Join-Path $planA.InstallDir 'bin\hermes.exe')
+        ExistingOrigin = 'https://github.com/NousResearch/hermes-agent.git'
+        Paths = $existingSetupPaths
+    }
+    $eligibleState = [pscustomobject]@{
+        schema_version = 2
+        status = 'Completed'
+        source_commit = $planA.SourceCommit
+        hermes_home = $planA.HermesHome
+        install_dir = $planA.InstallDir
+        runtime_root = $planA.RuntimeRoot
+        verification = [pscustomobject]@{ verified = $true; failed_checks = @() }
+    }
+    $eligibleExistingSetup = Test-HermesCompletedInstallForSetup -Diagnosis $eligibleDiagnosis -State $eligibleState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit
+    Assert-True ($eligibleExistingSetup.Eligible -and [string]$eligibleExistingSetup.Reason -ceq 'Eligible') 'completed wizard install is eligible for the setup-only route'
+
+    $notReadyDiagnosis = ($eligibleDiagnosis | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $notReadyDiagnosis.Ready = $false
+    $noCheckoutDiagnosis = ($eligibleDiagnosis | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $noCheckoutDiagnosis.ExistingCheckout = $false
+    $missingCommandDiagnosis = ($eligibleDiagnosis | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $missingCommandDiagnosis.ExistingCommand = $null
+    $foreignOriginDiagnosis = ($eligibleDiagnosis | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $foreignOriginDiagnosis.ExistingOrigin = 'https://evil.example/hermes-agent.git'
+    $wrongCommandDiagnosis = ($eligibleDiagnosis | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $wrongCommandDiagnosis.ExistingCommand = (Join-Path $planA.InstallDir 'venv\Scripts\hermes.exe')
+    $wrongDiagnosisPath = ($eligibleDiagnosis | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $wrongDiagnosisPath.Paths.RuntimeRoot = (Join-Path $testRootFull 'other-diagnosis-runtime')
+    $diagnosisRejects = @(
+        (Test-HermesCompletedInstallForSetup -Diagnosis $notReadyDiagnosis -State $eligibleState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $noCheckoutDiagnosis -State $eligibleState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $missingCommandDiagnosis -State $eligibleState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $foreignOriginDiagnosis -State $eligibleState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $wrongCommandDiagnosis -State $eligibleState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $wrongDiagnosisPath -State $eligibleState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit)
+    )
+    Assert-True (@($diagnosisRejects | Where-Object { $_.Eligible }).Count -eq 0) 'setup-only route rejects unready, foreign, missing, or path-mismatched diagnosis evidence'
+
+    $wrongSchemaState = ($eligibleState | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $wrongSchemaState.schema_version = 3
+    $runningState = ($eligibleState | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $runningState.status = 'Running'
+    $wrongCaseState = ($eligibleState | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $wrongCaseState.status = 'completed'
+    $wrongSourceState = ($eligibleState | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $wrongSourceState.source_commit = ('0' * 40)
+    $wrongStatePath = ($eligibleState | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $wrongStatePath.install_dir = (Join-Path $testRootFull 'other-install')
+    $unverifiedState = ($eligibleState | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $unverifiedState.verification.verified = $false
+    $failedChecksState = ($eligibleState | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $failedChecksState.verification.failed_checks = @('CommandWorks')
+    $stateRejects = @(
+        (Test-HermesCompletedInstallForSetup -Diagnosis $eligibleDiagnosis -State $null -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $eligibleDiagnosis -State $wrongSchemaState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $eligibleDiagnosis -State $runningState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $eligibleDiagnosis -State $wrongCaseState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $eligibleDiagnosis -State $wrongSourceState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $eligibleDiagnosis -State $wrongStatePath -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $eligibleDiagnosis -State $unverifiedState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit),
+        (Test-HermesCompletedInstallForSetup -Diagnosis $eligibleDiagnosis -State $failedChecksState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit)
+    )
+    Assert-True (@($stateRejects | Where-Object { $_.Eligible }).Count -eq 0) 'setup-only route rejects null, stale, malformed, unverified, or path-mismatched completed state'
+
+
+    $validWorkerCompletion = [pscustomobject]@{
+        Installed = $true
+        Verified = $true
+        FailedChecks = @()
+    }
+    $validWorkerState = [pscustomobject]@{
+        schema_version = 2
+        status = 'Completed'
+        plan_fingerprint = $planA.Fingerprint
+        verification = [pscustomobject]@{
+            verified = $true
+            failed_checks = @()
+        }
+    }
+    $knownZeroOutcome = Resolve-HermesInstallWorkerOutcome -ExitCode 0 -ExitCodeAvailable $true -CompletionData $validWorkerCompletion -State $validWorkerState -ExpectedPlanFingerprint $planA.Fingerprint
+    $missingExitOutcome = Resolve-HermesInstallWorkerOutcome -ExitCode $null -ExitCodeAvailable $false -CompletionData $validWorkerCompletion -State $validWorkerState -ExpectedPlanFingerprint $planA.Fingerprint
+    $nullAvailableOutcome = Resolve-HermesInstallWorkerOutcome -ExitCode $null -ExitCodeAvailable $true -CompletionData $validWorkerCompletion -State $validWorkerState -ExpectedPlanFingerprint $planA.Fingerprint
+    $knownFailureOutcome = Resolve-HermesInstallWorkerOutcome -ExitCode 40 -ExitCodeAvailable $true -CompletionData $validWorkerCompletion -State $validWorkerState -ExpectedPlanFingerprint $planA.Fingerprint
+    Assert-True ($knownZeroOutcome.Succeeded -and -not $knownZeroOutcome.UsedFallback -and [string]$knownZeroOutcome.Reason -ceq 'VerifiedCompletionAndState') 'worker outcome accepts zero exit only with matching complete event and state'
+    Assert-True ($missingExitOutcome.Succeeded -and $missingExitOutcome.UsedFallback -and $null -eq $missingExitOutcome.ExitCode) 'worker outcome safely falls back when Windows exit code is unavailable'
+    Assert-True ($nullAvailableOutcome.Succeeded -and $nullAvailableOutcome.UsedFallback -and $null -eq $nullAvailableOutcome.ExitCode) 'worker outcome falls back when an available exit-code property has no value'
+    Assert-True (-not $knownFailureOutcome.Succeeded -and [string]$knownFailureOutcome.Reason -ceq 'KnownNonZeroExit') 'known nonzero worker exit cannot be overridden by completion artifacts'
+
+    $badWorkerCompletion = [pscustomobject]@{ Installed = $true; Verified = $true; FailedChecks = @('CheckoutClean') }
+    $badCompletionOutcome = Resolve-HermesInstallWorkerOutcome -ExitCode $null -ExitCodeAvailable $false -CompletionData $badWorkerCompletion -State $validWorkerState -ExpectedPlanFingerprint $planA.Fingerprint
+    $wrongFingerprintState = [pscustomobject]@{
+        schema_version = 2
+        status = 'Completed'
+        plan_fingerprint = $planC.Fingerprint
+        verification = [pscustomobject]@{ verified = $true; failed_checks = @() }
+    }
+    $wrongFingerprintOutcome = Resolve-HermesInstallWorkerOutcome -ExitCode 0 -ExitCodeAvailable $true -CompletionData $validWorkerCompletion -State $wrongFingerprintState -ExpectedPlanFingerprint $planA.Fingerprint
+    $badVerificationState = [pscustomobject]@{
+        schema_version = 2
+        status = 'Completed'
+        plan_fingerprint = $planA.Fingerprint
+        verification = [pscustomobject]@{ verified = $true; failed_checks = @('CommandWorks') }
+    }
+    $badVerificationOutcome = Resolve-HermesInstallWorkerOutcome -ExitCode 0 -ExitCodeAvailable $true -CompletionData $validWorkerCompletion -State $badVerificationState -ExpectedPlanFingerprint $planA.Fingerprint
+    Assert-True (-not $badCompletionOutcome.Succeeded -and [string]$badCompletionOutcome.Reason -ceq 'InvalidCompletionData') 'worker outcome rejects a complete event with failed checks'
+    Assert-True (-not $wrongFingerprintOutcome.Succeeded -and [string]$wrongFingerprintOutcome.Reason -ceq 'InvalidState') 'worker outcome rejects a stale completed state from another plan'
+    Assert-True (-not $badVerificationOutcome.Succeeded -and [string]$badVerificationOutcome.Reason -ceq 'InvalidState') 'worker outcome rejects state verification failures'
+
+    $laterSetupResult = Start-HermesOfficialSetup -HermesHome $planA.HermesHome -InstallDir $planA.InstallDir -RuntimeRoot $planA.RuntimeRoot -Mode Later -Wait
+    Assert-True (-not $laterSetupResult.Started -and -not $laterSetupResult.Exited -and $null -eq $laterSetupResult.ExitCode -and $null -eq $laterSetupResult.ProcessId -and [string]$laterSetupResult.Mode -ceq 'Later' -and $null -eq $laterSetupResult.Command) 'Later setup returns the fixed no-process outcome without verification or launch'
+
+    $systemPowerShellForSetupTest = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $setupEventLines = @(& $systemPowerShellForSetupTest -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $projectRoot 'HermesEasySetup.ps1') -Action Setup -HermesHome $planA.HermesHome -InstallDir $planA.InstallDir -RuntimeRoot $planA.RuntimeRoot -SetupMode Later -WaitForSetup -JsonEvents)
+    $setupEventExit = $LASTEXITCODE
+    $setupEvents = @($setupEventLines | ForEach-Object { $_ | ConvertFrom-Json })
+    $startingSetupEventValid = $false
+    $closedSetupEventValid = $false
+    if ($setupEvents.Count -eq 2) {
+        $eventFields = @('type', 'timestamp', 'state', 'message', 'data')
+        $startingFields = @($setupEvents[0].PSObject.Properties.Name)
+        $closedFields = @($setupEvents[1].PSObject.Properties.Name)
+        $closedDataFields = @($setupEvents[1].data.PSObject.Properties.Name)
+        $startingSetupEventValid = (
+            $startingFields.Count -eq $eventFields.Count -and
+            @($startingFields | Where-Object { $eventFields -notcontains $_ }).Count -eq 0 -and
+            [string]$setupEvents[0].type -ceq 'setup' -and
+            [string]$setupEvents[0].state -ceq 'starting' -and
+            [string]$setupEvents[0].message -ceq '현재 Hermes 설치를 검증하고 공식 설정 창을 여는 중입니다.' -and
+            $null -eq $setupEvents[0].data
+        )
+        $closedSetupEventValid = (
+            $closedFields.Count -eq $eventFields.Count -and
+            @($closedFields | Where-Object { $eventFields -notcontains $_ }).Count -eq 0 -and
+            [string]$setupEvents[1].type -ceq 'setup' -and
+            [string]$setupEvents[1].state -ceq 'closed' -and
+            [string]$setupEvents[1].message -ceq '공식 Hermes 설정 창이 닫혔습니다. 설정 완료 여부는 이 마법사에서 확인하지 않았습니다.' -and
+            $closedDataFields.Count -eq 5 -and
+            $closedDataFields -contains 'Started' -and
+            $closedDataFields -contains 'Exited' -and
+            $closedDataFields -contains 'ExitCode' -and
+            $closedDataFields -contains 'Mode' -and
+            $closedDataFields -contains 'ProcessId' -and
+            $closedDataFields -notcontains 'Command' -and
+            -not [bool]$setupEvents[1].data.Started -and
+            -not [bool]$setupEvents[1].data.Exited -and
+            $null -eq $setupEvents[1].data.ExitCode -and
+            [string]$setupEvents[1].data.Mode -ceq 'Later' -and
+            $null -eq $setupEvents[1].data.ProcessId
+        )
+    }
+    Assert-True ($setupEventExit -eq 0 -and $setupEventLines.Count -eq 2 -and $startingSetupEventValid) 'Setup JsonEvents emits one fixed pre-launch event without raw child output'
+    Assert-True $closedSetupEventValid 'Setup JsonEvents emits one sanitized post-wait event with fixed result fields only'
 
     $systemGitHome = Join-Path $testRootFull 'system-git-probe-home'
     $signedSystemGit = Get-HermesVerificationGitPath -HermesHome $systemGitHome
@@ -856,7 +1016,7 @@ try {
     Assert-True (-not (Test-HermesStageFrame -Frame ([pscustomobject]@{stage='wrong';ok=$true;skipped=$false;reason=$null;duration_ms=1}) -ExpectedStage 'uv').Valid) 'wrong stage frame rejected'
     $nodeDepsPolicyReason = & $installEngineModule { Get-HermesMvpPolicyStageSkipReason -Stage 'node-deps' }
     $pathPolicyReason = & $installEngineModule { Get-HermesMvpPolicyStageSkipReason -Stage 'path' }
-    Assert-True (-not [string]::IsNullOrWhiteSpace($nodeDepsPolicyReason) -and [string]::IsNullOrWhiteSpace($pathPolicyReason)) 'v0.1.1 policy skips only optional node-deps'
+    Assert-True (-not [string]::IsNullOrWhiteSpace($nodeDepsPolicyReason) -and [string]::IsNullOrWhiteSpace($pathPolicyReason)) 'v0.1.2 policy skips only optional node-deps'
 
     $contract = Get-Content -Raw (Join-Path $projectRoot 'config\hermes-manifest.json') | ConvertFrom-Json
     function New-TestManifest([bool]$Desktop) {
@@ -946,6 +1106,18 @@ try {
     $xamlText = Get-Content -Raw (Join-Path $projectRoot 'ui\MainWindow.xaml')
     Assert-True ($xamlText -match 'x:Name="ApprovalCheck"') 'GUI has explicit approval control'
     Assert-True ($xamlText -match 'x:Name="InstallButton"[^>]*IsEnabled="False"') 'GUI install starts disabled'
+    Assert-True ($xamlText -match 'x:Name="LabPanel"') 'GUI includes the fifth-step lab integration panel'
+    Assert-True (Test-HermesLabProfileName -Name 'albus') 'lab profile validation accepts a separated named profile'
+    Assert-True (-not (Test-HermesLabProfileName -Name 'default')) 'lab profile validation rejects the shared default profile'
+    Assert-True (Test-HermesNetBirdIPv4 -Address '100.69.181.62') 'NetBird CGNAT IPv4 is accepted'
+    Assert-True (-not (Test-HermesNetBirdIPv4 -Address '192.168.0.19')) 'ordinary private IPv4 is not mistaken for NetBird'
+    $labInputPath = Join-Path $testRootFull 'lab-input.bin'
+    $labInput = [pscustomobject]@{ ProfileName = 'albus'; MattermostToken = 'lab-secret-token'; DashboardPassword = 'lab-secret-password' }
+    Protect-HermesLabInput -Value $labInput -LiteralPath $labInputPath | Out-Null
+    $labCipherText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($labInputPath))
+    Assert-True ($labCipherText -notmatch 'lab-secret-token|lab-secret-password') 'Lab worker input does not expose plaintext secrets'
+    $labRoundTrip = Unprotect-HermesLabInput -LiteralPath $labInputPath
+    Assert-Equal 'lab-secret-token' $labRoundTrip.MattermostToken 'Lab DPAPI input round-trips for the current user'
 } finally {
     if (Test-Path -LiteralPath $testRootFull -PathType Container) {
         $resolved = [System.IO.Path]::GetFullPath($testRootFull)
