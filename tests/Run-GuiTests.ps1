@@ -22,7 +22,7 @@ try {
         'PlanPanel', 'IncludeDesktopCheck', 'SkipComputerUseCheck', 'SetupModeCombo',
         'PlanText', 'ApprovalCheck', 'InstallButton', 'WorkPanel', 'InstallProgress',
         'WorkLog', 'BundleButton', 'FinishButton', 'SetupPanel', 'SetupTitle', 'SetupStatus',
-        'SetupDetails', 'SetupLaterButton', 'SetupStartButton', 'SetupLabButton', 'SetupFinishButton',
+        'SetupDetails', 'SetupModelCombo', 'SetupRefreshButton', 'SetupLaterButton', 'SetupStartButton', 'SetupLabButton', 'SetupFinishButton',
         'LabPanel', 'LabProfileName', 'LabFullName', 'LabRole', 'LabReuseProfile',
         'LabMattermostURL', 'LabBotToken', 'LabAllowedUserIDs', 'LabHomeChannelID',
         'LabRequireMention', 'LabReplyMode', 'LabNetBirdIP', 'LabDetectNetBirdButton',
@@ -57,8 +57,8 @@ try {
         throw 'Existing-install setup route must be hidden and disabled by default.'
     }
     $existingModes = @($existingSetupModeCombo.Items | ForEach-Object { [string]$_.Tag })
-    if ($existingModes.Count -ne 2 -or $existingModes[0] -cne 'Portal' -or $existingModes[1] -cne 'Full') {
-        throw 'Existing-install setup route must allow exactly Portal and Full.'
+    if ($existingModes.Count -ne 1 -or $existingModes[0] -cne 'Portal') {
+        throw 'Existing-install setup route must expose only the fixed OpenAI Codex flow.'
     }
     if ([string]::IsNullOrWhiteSpace([System.Windows.Automation.AutomationProperties]::GetName($existingSetupModeCombo)) -or
         [string]::IsNullOrWhiteSpace([System.Windows.Automation.AutomationProperties]::GetName($existingSetupButton))) {
@@ -83,11 +83,19 @@ try {
 $guiScriptText = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'HermesEasySetup.Gui.ps1'), [System.Text.Encoding]::UTF8)
 if (-not $guiScriptText.Contains('[void]$script:worker.Handle')) { throw 'Install worker must cache its process handle immediately.' }
 if (-not $guiScriptText.Contains('Resolve-HermesInstallWorkerOutcome')) { throw 'GUI must use the verified install worker outcome resolver.' }
+if (-not $guiScriptText.Contains('Show-InstallStartFailure -Message $_.Exception.Message')) { throw 'Install worker startup failures must remain visible inside the GUI.' }
+if (-not $guiScriptText.Contains('Restore-HermesResumablePlanSelection')) { throw 'GUI must restore the exact option selection for a resumable failed checkpoint.' }
+if (-not $guiScriptText.Contains("`$arguments += '-Resume'")) { throw 'GUI must pass the explicit resume switch only for a matching failed checkpoint.' }
 
 if (-not $guiScriptText.Contains('$ui.ExistingSetupButton.Add_Click({ Open-ExistingInstallSetupStep })')) { throw 'Existing-install setup button must use the guarded setup-step route.' }
 if ($guiScriptText.Contains('Start-HermesOfficialSetup')) { throw 'GUI must never bypass the tracked CLI setup worker.' }
 if (-not $guiScriptText.Contains('$ui.SetupStartButton.Add_Click({ Start-SetupWorker })')) { throw 'Only the explicit setup-start action may launch the tracked setup worker.' }
-if (-not $guiScriptText.Contains('$ui.SetupLabButton.Add_Click({ Show-LabStep })')) { throw 'Setup must expose the explicit lab integration route.' }
+if (-not ($guiScriptText.Contains('$ui.SetupLabButton.Add_Click') -and $guiScriptText.Contains('Show-LabStep'))) { throw 'Setup must expose the authenticated lab integration route.' }
+if (-not $guiScriptText.Contains("'-Action', 'CodexAuth', '-Apply', '-JsonEvents'")) { throw 'GUI must launch only the tracked Codex OAuth worker.' }
+if (-not ($xamlText -match 'x:Name="SetupOAuthCode"' -and $xamlText -match 'x:Name="SetupOpenOAuthButton"')) { throw 'Codex device flow must expose its one-time code and browser action inside the wizard.' }
+if (-not ($guiScriptText.Contains("@('stage', 'oauth', 'complete', 'error')") -and $guiScriptText.Contains("'https://auth.openai.com/codex/device'"))) { throw 'GUI must accept only the fixed Codex device URL and tracked OAuth events.' }
+if (-not ($guiScriptText -match 'SetupLabButton\.Add_Click\(\{[\s\S]*?try\s*\{[\s\S]*?Show-LabStep[\s\S]*?catch')) { throw 'Agent settings navigation must catch errors instead of terminating the WPF wizard.' }
+if ($xamlText -match 'Nous Portal|OpenRouter|Discord|Slack|Telegram|Spotify') { throw 'Minimal wizard must not expose excluded provider or messaging setup choices.' }
 if (-not $guiScriptText.Contains('Protect-HermesLabInput -Value $input')) { throw 'Lab secrets must use the DPAPI-protected worker input transport.' }
 if (-not $guiScriptText.Contains('[void]$script:labWorker.Handle')) { throw 'Lab worker must cache its process handle immediately.' }
 $probeOut = [System.IO.Path]::GetTempFileName()

@@ -38,3 +38,6 @@ Thumbs.db
 
 # Local source overrides
 config/hermes-source.local.json
+
+# Local working notes, not part of the installer
+Claude outputs/

@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Diagnose', 'Plan', 'Install', 'Verify', 'Setup', 'LabSetup', 'Bundle')]
+    [ValidateSet('Diagnose', 'Plan', 'Install', 'Verify', 'Setup', 'CodexStatus', 'CodexAuth', 'LabSetup', 'Bundle')]
     [string]$Action = 'Diagnose',
     [string]$HermesHome,
     [string]$InstallDir,
@@ -134,6 +134,14 @@ try {
                 Write-ResultObject $setupResult
             }
         }
+        'CodexStatus' {
+            Write-ResultObject (Get-HermesCodexStatus @common)
+        }
+        'CodexAuth' {
+            if (-not $Apply) { throw (New-Object System.InvalidOperationException 'OpenAI Codex 인증을 시작하려면 -Apply를 함께 지정하세요.') }
+            $result = Invoke-HermesCodexAuthentication @common -ProgressCallback $eventCallback
+            if (-not $JsonEvents) { Write-ResultObject $result }
+        }
         'LabSetup' {
             if (-not $Apply) {
                 throw (New-Object System.InvalidOperationException '연구실 연결 변경을 승인하려면 -Apply를 함께 지정하세요.')
@@ -156,12 +164,10 @@ try {
                     ProfileName = [string]$input.ProfileName
                     FullName = [string]$input.FullName
                     Role = [string]$input.Role
+                    ModelName = [string]$input.ModelName
                     MattermostURL = [string]$input.MattermostURL
                     MattermostToken = [string]$input.MattermostToken
-                    AllowedUserIDs = [string]$input.AllowedUserIDs
                     HomeChannelID = [string]$input.HomeChannelID
-                    RequireMention = [bool]$input.RequireMention
-                    ReplyMode = [string]$input.ReplyMode
                     NetBirdIP = [string]$input.NetBirdIP
                     DashboardPort = [int]$input.DashboardPort
                     DashboardUsername = [string]$input.DashboardUsername

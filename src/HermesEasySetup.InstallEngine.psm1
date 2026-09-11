@@ -218,6 +218,7 @@ function New-HermesStageEnvironment {
     $environment['UV_NO_MODIFY_PATH'] = '1'
     $environment['UV_MANAGED_PYTHON'] = '1'
     $environment['UV_PYTHON_NO_REGISTRY'] = '1'
+    if ($Stage -ceq 'python') { $environment['UV_NO_PROJECT'] = '1' }
     $environment['UV_PYTHON_INSTALL_DIR'] = [System.IO.Path]::GetFullPath((Join-Path ([string]$Plan.HermesHome) 'python'))
     $environment['UV_TOOL_DIR'] = [System.IO.Path]::GetFullPath((Join-Path ([string]$Plan.HermesHome) 'uv-tools'))
     $environment['UV_TOOL_BIN_DIR'] = [System.IO.Path]::GetFullPath((Join-Path ([string]$Plan.HermesHome) 'bin'))
@@ -252,6 +253,8 @@ function New-HermesStageEnvironment {
     $environment['PATHEXT'] = '.COM;.EXE;.BAT;.CMD'
 
     foreach ($key in @(
+        'VIRTUAL_ENV', 'UV_PROJECT', 'UV_PROJECT_ENVIRONMENT', 'UV_PYTHON',
+        'CONDA_PREFIX', 'CONDA_DEFAULT_ENV', 'PIPENV_ACTIVE', 'POETRY_ACTIVE',
         'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
         'GIT_CONFIG_KEY_1', 'GIT_CONFIG_VALUE_1', 'GIT_CONFIG_SYSTEM', 'GIT_EXEC_PATH', 'GIT_TEMPLATE_DIR',
         'GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
@@ -295,6 +298,7 @@ function New-HermesStageEnvironment {
     $excludesConfigValue = $excludesPath.Replace('\', '/').Replace('"', '\"')
     $configText = '[core]' + [char]10 +
         [char]9 + 'autocrlf = false' + [char]10 +
+        [char]9 + 'longpaths = true' + [char]10 +
         [char]9 + 'attributesFile = "' + $attributesConfigValue + '"' + [char]10 +
         [char]9 + 'excludesFile = "' + $excludesConfigValue + '"' + [char]10 +
         [char]9 + 'hooksPath = NUL' + [char]10 +
@@ -323,6 +327,70 @@ function New-HermesStageEnvironment {
 
     $environment['GIT_CONFIG_GLOBAL'] = $configPath
     return $environment
+}
+
+function Convert-HermesBrokenUvPythonMinorJunction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        [string]$PythonVersion = '3.11'
+    )
+
+    $unchanged = { param([string]$Reason) [pscustomobject]@{ Changed = $false; Reason = $Reason; Path = $null } }
+    try {
+        if ($PythonVersion -cnotmatch '^[0-9]+\.[0-9]+$') { return & $unchanged 'Unsupported Python minor version' }
+        $hermesHomeFull = [System.IO.Path]::GetFullPath([string]$Plan.HermesHome).TrimEnd('\', '/')
+        $pythonRoot = [System.IO.Path]::GetFullPath((Join-Path $hermesHomeFull 'python')).TrimEnd('\', '/')
+        if (-not $pythonRoot.StartsWith($hermesHomeFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $pythonRoot -PathType Container)) {
+            return & $unchanged 'Managed Python root is absent'
+        }
+        $pythonRootItem = Get-Item -LiteralPath $pythonRoot -Force
+        if (($pythonRootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return & $unchanged 'Managed Python root is a reparse point' }
+
+        $minorPattern = '^cpython-' + [regex]::Escape($PythonVersion) + '-windows-(x86_64|aarch64)-none$'
+        $links = @(Get-ChildItem -LiteralPath $pythonRoot -Force -Directory -ErrorAction Stop | Where-Object { $_.Name -cmatch $minorPattern })
+        if ($links.Count -ne 1) { return & $unchanged 'A unique managed Python minor junction was not found' }
+        $linkItem = $links[0]
+        if (($linkItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 -or [string]$linkItem.LinkType -cne 'Junction') {
+            return & $unchanged 'Managed Python minor path is not a junction'
+        }
+        $linkFull = [System.IO.Path]::GetFullPath([string]$linkItem.FullName).TrimEnd('\', '/')
+        if (-not [string]::Equals((Split-Path -Parent $linkFull).TrimEnd('\', '/'), $pythonRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return & $unchanged 'Managed Python minor junction escaped its root'
+        }
+        $targetValue = [string]$linkItem.Target
+        if ([string]::IsNullOrWhiteSpace($targetValue)) { return & $unchanged 'Managed Python minor junction target is empty' }
+        $targetFull = [System.IO.Path]::GetFullPath($targetValue).TrimEnd('\', '/')
+        if (-not [string]::Equals((Split-Path -Parent $targetFull).TrimEnd('\', '/'), $pythonRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return & $unchanged 'Managed Python patch directory escaped its root'
+        }
+        $suffix = $linkItem.Name.Substring(('cpython-' + $PythonVersion + '-').Length)
+        $targetPattern = '^cpython-' + [regex]::Escape($PythonVersion) + '\.[0-9]+-' + [regex]::Escape($suffix) + '$'
+        if ((Split-Path -Leaf $targetFull) -cnotmatch $targetPattern -or -not (Test-Path -LiteralPath $targetFull -PathType Container)) {
+            return & $unchanged 'Managed Python patch directory is invalid'
+        }
+        $targetItem = Get-Item -LiteralPath $targetFull -Force
+        $targetPython = Join-Path $targetFull 'python.exe'
+        if (($targetItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not (Test-HermesPortableExecutableHeader -LiteralPath $targetPython -MaximumLength 128MB)) {
+            return & $unchanged 'Managed Python patch executable is invalid'
+        }
+
+        # uv can create a non-resolving minor-version junction on Windows even
+        # though the patch-version directory is complete. Materialize the patch
+        # directory at the minor path so the official installer can verify it.
+        [System.IO.Directory]::Delete($linkFull, $false)
+        [System.IO.Directory]::Move($targetFull, $linkFull)
+        $materialized = Get-Item -LiteralPath $linkFull -Force
+        if (($materialized.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not (Test-HermesPortableExecutableHeader -LiteralPath (Join-Path $linkFull 'python.exe') -MaximumLength 128MB)) {
+            throw 'Materialized managed Python directory did not verify'
+        }
+        return [pscustomobject]@{ Changed = $true; Reason = $null; Path = $linkFull }
+    } catch {
+        return & $unchanged (Protect-HermesLogText $_.Exception.Message)
+    }
 }
 
 function Get-HermesStageTimeoutSeconds {
@@ -383,7 +451,7 @@ function Test-HermesGitCandidate {
             foreach ($extension in @('.com', '.cmd', '.bat', '.ps1')) {
                 if (Test-Path -LiteralPath (Join-Path $directory ('git' + $extension)) -PathType Leaf) { return $null }
             }
-            $signature = Get-AuthenticodeSignature -LiteralPath $fullPath -ErrorAction Stop
+            $signature = Get-HermesAuthenticodeSignature -LiteralPath $fullPath
             if ([string]$signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { return $null }
             $simpleName = $signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
             $subject = [string]$signature.SignerCertificate.Subject
@@ -575,7 +643,7 @@ function Test-HermesAuthenticodePublisher {
     )
 
     try {
-        $signature = Get-AuthenticodeSignature -LiteralPath $LiteralPath -ErrorAction Stop
+        $signature = Get-HermesAuthenticodeSignature -LiteralPath $LiteralPath
         if ([string]$signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { return $false }
         $identity = [string]$signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) + ' ' + [string]$signature.SignerCertificate.Subject
         return ($identity -match $PublisherPattern)
@@ -894,6 +962,88 @@ function Assert-HermesFreshManagedCommandSeed {
         $cua = Get-HermesRegistryBareCommandCandidates -CommandName 'cua-driver' -PathValues $PathValues
         if (-not $cua.Valid -or -not [bool]$cua.Absent) { throw 'Pre-existing cua-driver command rejected for a fresh install' }
     }
+}
+
+function Move-HermesResumeManagedSeedToQuarantine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        [Parameter(Mandatory = $true)]$State
+    )
+
+    if (-not (Test-HermesStateMatchesResumeEnvelope -State $State -Plan $Plan)) {
+        throw 'Resume checkpoint envelope does not match the current plan'
+    }
+    $homeFull = [System.IO.Path]::GetFullPath([string]$Plan.HermesHome).TrimEnd('\', '/')
+    $installFull = [System.IO.Path]::GetFullPath([string]$Plan.InstallDir).TrimEnd('\', '/')
+    $runtimeFull = [System.IO.Path]::GetFullPath([string]$Plan.RuntimeRoot).TrimEnd('\', '/')
+    $launcherAttestationFull = [System.IO.Path]::GetFullPath((Join-Path $runtimeFull 'state\launcher-attestation-v1.json'))
+    $targets = @(
+        [pscustomobject]@{ Name = 'install-dir'; Path = $installFull },
+        [pscustomobject]@{ Name = 'uv.exe'; Path = (Join-Path $homeFull 'bin\uv.exe') },
+        [pscustomobject]@{ Name = 'uvx.exe'; Path = (Join-Path $homeFull 'bin\uvx.exe') },
+        [pscustomobject]@{ Name = 'browser-use.exe'; Path = (Join-Path $homeFull 'bin\browser-use.exe') },
+        [pscustomobject]@{ Name = 'node'; Path = (Join-Path $homeFull 'node') },
+        [pscustomobject]@{ Name = 'python'; Path = (Join-Path $homeFull 'python') },
+        [pscustomobject]@{ Name = 'uv-tools'; Path = (Join-Path $homeFull 'uv-tools') },
+        [pscustomobject]@{ Name = 'git'; Path = (Join-Path $homeFull 'git') },
+        [pscustomobject]@{ Name = 'launcher-attestation-v1.json'; Path = $launcherAttestationFull }
+    )
+    $existing = @($targets | Where-Object { Test-Path -LiteralPath ([string]$_.Path) })
+    if ($existing.Count -eq 0) {
+        return [pscustomobject]@{ Changed = $false; Root = $null; Items = @() }
+    }
+
+    foreach ($target in $existing) {
+        $sourceFull = [System.IO.Path]::GetFullPath([string]$target.Path).TrimEnd('\', '/')
+        $underHome = $sourceFull.StartsWith($homeFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+        $isLauncherAttestation = [string]::Equals($sourceFull, $launcherAttestationFull, [System.StringComparison]::OrdinalIgnoreCase)
+        if (-not $underHome -and -not [string]::Equals($sourceFull, $installFull, [System.StringComparison]::OrdinalIgnoreCase) -and -not $isLauncherAttestation) {
+            throw 'Resume recovery target escaped the approved managed paths'
+        }
+        if ([string]::Equals($sourceFull, $homeFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+            [string]::Equals($sourceFull, $runtimeFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+            [string]::Equals($sourceFull, [System.IO.Path]::GetPathRoot($sourceFull), [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Resume recovery target is too broad'
+        }
+        $parent = Split-Path -Parent $sourceFull
+        if (-not (Test-HermesOrdinaryDirectoryPathUnderRoot -LiteralPath $parent -RootPath ([System.IO.Path]::GetPathRoot($parent)))) {
+            throw 'Resume recovery target parent is not an ordinary directory path'
+        }
+    }
+
+    $recoveryRoot = Join-Path $runtimeFull 'recovery'
+    if (-not (Test-Path -LiteralPath $recoveryRoot -PathType Container)) { New-Item -ItemType Directory -Path $recoveryRoot -Force | Out-Null }
+    $quarantineRoot = Join-Path $recoveryRoot ((Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss-fff') + '-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $quarantineRoot | Out-Null
+    $moved = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($target in $existing) {
+            $source = [System.IO.Path]::GetFullPath([string]$target.Path)
+            $destination = Join-Path $quarantineRoot ([string]$target.Name)
+            $item = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+            if ([bool]$item.PSIsContainer) { [System.IO.Directory]::Move($source, $destination) } else { [System.IO.File]::Move($source, $destination) }
+            $moved.Add([pscustomobject]@{ Name = [string]$target.Name; Source = $source; Destination = $destination; Directory = [bool]$item.PSIsContainer })
+        }
+        $manifest = [pscustomobject][ordered]@{
+            schema_version = 1
+            created_at = (Get-Date).ToUniversalTime().ToString('o')
+            plan_fingerprint = [string]$Plan.Fingerprint
+            items = @($moved | ForEach-Object { [pscustomobject][ordered]@{ name = $_.Name; source = $_.Source; destination = $_.Destination } })
+        }
+        [System.IO.File]::WriteAllText((Join-Path $quarantineRoot 'recovery.json'), ($manifest | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding $false))
+    } catch {
+        $movedArray = $moved.ToArray()
+        for ($index = $movedArray.Count - 1; $index -ge 0; $index--) {
+            $entry = $movedArray[$index]
+            try {
+                if ([bool]$entry.Directory -and (Test-Path -LiteralPath ([string]$entry.Destination) -PathType Container)) { [System.IO.Directory]::Move([string]$entry.Destination, [string]$entry.Source) }
+                elseif (Test-Path -LiteralPath ([string]$entry.Destination) -PathType Leaf) { [System.IO.File]::Move([string]$entry.Destination, [string]$entry.Source) }
+            } catch {}
+        }
+        throw
+    }
+    return [pscustomobject]@{ Changed = $true; Root = $quarantineRoot; Items = $moved.ToArray() }
 }
 
 function Test-HermesManagedAbsoluteCommandBoundary {
@@ -2818,7 +2968,7 @@ function Invoke-HermesInstall {
         Throw-HermesEasySetupError -Message 'Program Files Git Bash가 필수 MSYS 자식 프로세스를 실행하지 못합니다. Git for Windows 또는 Windows 프로세스 완화 정책을 복구한 뒤 다시 실행하세요.' -ExitCode 10 -Category 'Preflight'
     }
     $managedCommandProof = @{}
-    if (-not [bool]$preflight.ExistingCheckout) {
+    if (-not [bool]$preflight.ExistingCheckout -and -not [bool]$Resume) {
         try {
             Assert-HermesFreshManagedCommandSeed -Plan $plan -PathValues $initialRegistryPathValues
         } catch {
@@ -2839,21 +2989,38 @@ function Invoke-HermesInstall {
     $freshRepositoryProof = $null
     $launcherExcludeWrite = $null
     $launcherAttestationWrite = $null
+    $resumeQuarantine = $null
+    $useExistingCheckout = [bool]$preflight.ExistingCheckout
     try {
         $lock = Enter-HermesInstallLock -RuntimeRoot $paths.RuntimeRoot
-        if ($preflight.ExistingCheckout) {
+        $prior = Read-HermesInstallState -LiteralPath $paths.StateFile
+        if ($Resume -and -not (Test-HermesStateMatchesResumeEnvelope -State $prior -Plan $plan)) {
+            Throw-HermesEasySetupError -Message '재개 상태의 계획·소스·경로가 현재 승인 계획과 다릅니다.' -ExitCode 2 -Category 'Resume'
+        }
+        if ($useExistingCheckout) {
             if (-not $Resume) {
                 Throw-HermesEasySetupError -Message '기존 checkout은 launcher attestation v1이 있는 실패 상태의 -Resume만 허용합니다. 새 빈 InstallDir에서 다시 설치하세요.' -ExitCode 10 -Category 'Preflight'
             }
             $existingGate = Test-HermesInstallation -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir -RuntimeRoot $paths.RuntimeRoot -ExpectedCommit ([string]$sourceConfig.hermes.commitSha) -ExpectedInstallerSha256 ([string]$sourceConfig.installer.sha256) -StaticOnly -LogPath $logPath
-            if (-not $existingGate.StaticProvenanceValid) {
-                Throw-HermesEasySetupError -Message '기존 checkout의 정적 provenance 또는 launcher attestation이 유효하지 않습니다. 새 빈 InstallDir에서 다시 설치하세요.' -ExitCode 10 -Category 'Preflight'
-            }
             $existingAttestationGate = Test-HermesLauncherAttestation -Plan $plan -ExpectedCommit ([string]$sourceConfig.hermes.commitSha) -InstallerSha256 ([string]$sourceConfig.installer.sha256)
-            if (-not $existingAttestationGate.Valid) {
-                Throw-HermesEasySetupError -Message '기존 checkout의 managed command attestation이 유효하지 않습니다.' -ExitCode 10 -Category 'Preflight'
+            if ($existingGate.StaticProvenanceValid -and $existingAttestationGate.Valid) {
+                $managedCommandProof = $existingAttestationGate.ManagedCommandProof
+            } else {
+                try {
+                    $resumeQuarantine = Move-HermesResumeManagedSeedToQuarantine -Plan $plan -State $prior
+                    Assert-HermesFreshManagedCommandSeed -Plan $plan -PathValues $initialRegistryPathValues
+                    $useExistingCheckout = $false
+                } catch {
+                    Throw-HermesEasySetupError -Message "증명되지 않은 미완성 checkout을 복구 격리하지 못했습니다: $(Protect-HermesLogText $_.Exception.Message)" -ExitCode 10 -Category 'Preflight'
+                }
             }
-            $managedCommandProof = $existingAttestationGate.ManagedCommandProof
+        } elseif ($Resume) {
+            try {
+                $resumeQuarantine = Move-HermesResumeManagedSeedToQuarantine -Plan $plan -State $prior
+                Assert-HermesFreshManagedCommandSeed -Plan $plan -PathValues $initialRegistryPathValues
+            } catch {
+                Throw-HermesEasySetupError -Message "실패 설치의 관리 경로를 복구 격리하지 못했습니다: $(Protect-HermesLogText $_.Exception.Message)" -ExitCode 10 -Category 'Preflight'
+            }
         }
         $installer = Get-HermesVerifiedInstaller -SourceConfig $sourceConfig -Paths $paths -ForceDownload:$ForceDownload -Downloader $Downloader -ProgressCallback $ProgressCallback -LogPath $logPath
         $manifest = Get-HermesInstallerManifest -InstallerPath $installer.Path -Plan $plan -SourceConfig $sourceConfig -LogPath $logPath -ProgressCallback $ProgressCallback
@@ -2869,7 +3036,8 @@ function Invoke-HermesInstall {
                 Throw-HermesEasySetupError -Message '재개 상태가 없거나 현재 계획·manifest와 다릅니다. -Resume 없이 새 계획으로 시작하세요.' -ExitCode 2 -Category 'Resume'
             }
             $state = Reset-HermesStateForSafeResume -State $prior
-            [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'resume' -State 'accepted' -Message '체크포인트를 확인했습니다. 손상 복구를 위해 자동 단계를 안전하게 다시 적용합니다.' -Percent 11)
+            $resumeMessage = $(if ($null -ne $resumeQuarantine -and [bool]$resumeQuarantine.Changed) { '체크포인트를 확인하고 이전 관리 파일을 복구 폴더로 격리했습니다. 자동 단계를 안전하게 다시 적용합니다.' } else { '체크포인트를 확인했습니다. 손상 복구를 위해 자동 단계를 안전하게 다시 적용합니다.' })
+            [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'resume' -State 'accepted' -Message $resumeMessage -Percent 11)
         } else {
             $state = New-HermesInstallState -Plan $freshPlan -Manifest $manifest
         }
@@ -2933,7 +3101,7 @@ function Invoke-HermesInstall {
 
             $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installer.Path, '-Stage', $name) + $commonArgs
             $timeout = Get-HermesStageTimeoutSeconds -Stage $name
-            $freshRepositoryIntended = (-not [bool]$Resume -and -not [bool]$preflight.ExistingCheckout)
+            $freshRepositoryIntended = (-not [bool]$useExistingCheckout)
             if ($name -eq 'repository' -and $freshRepositoryIntended) {
                 $freshRepositorySeed = Get-HermesFreshCheckoutSeed -InstallDir ([string]$freshPlan.InstallDir)
                 if (-not $freshRepositorySeed.Eligible) {
@@ -2970,9 +3138,21 @@ function Invoke-HermesInstall {
                 Throw-HermesEasySetupError -Message "단계 '$name' 직전 User 환경 변수가 승인된 전이와 다릅니다." -ExitCode 10 -Category 'Preflight'
             }
             Set-HermesPersistentEnvironmentStageExpectation -Snapshot $pathExposureSnapshot -Plan $freshPlan -Stage $name
-            $stageEnvironment = New-HermesStageEnvironment -Plan $freshPlan -Stage $name -ExistingCheckout:$preflight.ExistingCheckout
+            $stageEnvironment = New-HermesStageEnvironment -Plan $freshPlan -Stage $name -ExistingCheckout:$useExistingCheckout
             try {
                 $result = Invoke-HermesProcess -FilePath $powershell -ArgumentList $arguments -Environment $stageEnvironment -TimeoutSeconds $timeout
+                if ($name -ceq 'python' -and $result.Started -and -not $result.TimedOut) {
+                    $initialPythonFrame = ConvertFrom-HermesJsonFrame -Text $result.StdOut -RequiredProperty 'stage'
+                    $initialPythonFailed = ($result.ExitCode -ne 0 -or $null -eq $initialPythonFrame -or -not [bool]$initialPythonFrame.ok)
+                    if ($initialPythonFailed) {
+                        $pythonRepair = Convert-HermesBrokenUvPythonMinorJunction -Plan $freshPlan -PythonVersion '3.11'
+                        if ([bool]$pythonRepair.Changed) {
+                            Write-HermesCapturedOutput -ProcessResult $result -LogPath $logPath -Stage 'python-initial' -Callback $null
+                            [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'log' -Stage 'python' -State 'running' -Message 'Windows uv Python 링크 문제를 자동 복구하고 검증을 다시 실행합니다.' -Percent $percentStart)
+                            $result = Invoke-HermesProcess -FilePath $powershell -ArgumentList $arguments -Environment $stageEnvironment -TimeoutSeconds $timeout
+                        }
+                    }
+                }
             } finally {
                 Remove-HermesStageEnvironmentArtifacts -Environment $stageEnvironment -Plan $freshPlan
             }
@@ -3019,7 +3199,7 @@ function Invoke-HermesInstall {
                     [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'stage' -Stage $name -State 'failed' -Message $reason -Percent $percentStart)
                     Throw-HermesEasySetupError -Message "Hermes 설치 단계 'repository' 실패: $reason" -ExitCode 40 -Category 'InstallStage'
                 }
-            } elseif ($name -eq 'repository' -and [bool]$preflight.ExistingCheckout) {
+            } elseif ($name -eq 'repository' -and [bool]$useExistingCheckout) {
                 $existingPostRepositoryGate = Test-HermesInstallation -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir -RuntimeRoot $paths.RuntimeRoot -ExpectedCommit ([string]$sourceConfig.hermes.commitSha) -ExpectedInstallerSha256 ([string]$sourceConfig.installer.sha256) -StaticOnly -LogPath $logPath
                 if (-not $existingPostRepositoryGate.StaticProvenanceValid) {
                     $reason = 'repository 단계 후 기존 checkout provenance 검증에 실패했습니다.'
@@ -3197,7 +3377,7 @@ function Start-HermesOfficialSetup {
 
 Export-ModuleMember -Function @(
     'Get-HermesStageArguments', 'New-HermesStageEnvironment', 'Remove-HermesStageEnvironmentArtifacts',
-    'Get-HermesStageTimeoutSeconds', 'Test-HermesStageFrame',
+    'Get-HermesStageTimeoutSeconds', 'Test-HermesStageFrame', 'Convert-HermesBrokenUvPythonMinorJunction',
     'Get-HermesVerificationGitPath',
     'Read-HermesBootstrapMarker', 'Test-HermesInstallation', 'Invoke-HermesInstall',
     'Start-HermesOfficialSetup'

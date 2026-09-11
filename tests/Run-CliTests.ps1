@@ -3,6 +3,8 @@ param()
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $cli = Join-Path $projectRoot 'HermesEasySetup.ps1'
 $systemPowerShell = Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -38,6 +40,18 @@ try {
     $guardError = $guardOutput[-1] | ConvertFrom-Json
     Assert-CliTrue ($guardExit -eq 2 -and [int]$guardError.exit_code -eq 2 -and [string]$guardError.message -like '*-Apply*') 'Install without Apply is default-deny'
     Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) 'Apply guard creates no runtime state'
+
+    $codexGuardOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action CodexAuth -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -Json)
+    $codexGuardExit = $LASTEXITCODE
+    $codexGuardError = $codexGuardOutput[-1] | ConvertFrom-Json
+    Assert-CliTrue ($codexGuardExit -eq 2 -and [int]$codexGuardError.exit_code -eq 2 -and [string]$codexGuardError.message -like '*-Apply*') 'Codex OAuth without Apply is default-deny'
+    Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) 'Codex OAuth guard creates no runtime state'
+
+    $codexStatusOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action CodexStatus -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -Json)
+    $codexStatusExit = $LASTEXITCODE
+    $codexStatusError = $codexStatusOutput[-1] | ConvertFrom-Json
+    Assert-CliTrue ($codexStatusExit -ne 0 -and [string]$codexStatusError.message -like '*검증된 Hermes 설치*') 'Codex status fails closed when Hermes is absent'
+    Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) 'Codex status remains read-only when Hermes is absent'
 
     $computerUseOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SetupMode Later -Json)
     $computerUseExit = $LASTEXITCODE

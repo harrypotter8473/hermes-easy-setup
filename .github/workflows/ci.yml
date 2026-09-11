@@ -45,6 +45,10 @@ jobs:
         shell: powershell
         run: powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Run-GuiTests.ps1
 
+      - name: Dashboard readiness and authentication regression tests
+        shell: powershell
+        run: .\tests\Run-LabDashboardTests.ps1
+
       - name: Unit tests on PowerShell 7
         shell: pwsh
         run: .\tests\Run-Tests.ps1

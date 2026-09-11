@@ -14,7 +14,7 @@ $names = @(
     'ExistingSetupButton', 'WelcomeCloseButton', 'ToPlanButton',
     'PlanPanel', 'IncludeDesktopCheck', 'SkipComputerUseCheck', 'SetupModeCombo', 'PlanText', 'ApprovalCheck',
     'BackButton', 'InstallButton', 'WorkPanel', 'WorkTitle', 'WorkStatus', 'InstallProgress', 'WorkLog',
-    'BundleButton', 'FinishButton', 'SetupPanel', 'SetupTitle', 'SetupStatus', 'SetupDetails',
+    'BundleButton', 'FinishButton', 'SetupPanel', 'SetupTitle', 'SetupStatus', 'SetupDetails', 'SetupOAuthPanel', 'SetupOAuthCode', 'SetupOpenOAuthButton', 'SetupModelCombo', 'SetupRefreshButton',
     'SetupLaterButton', 'SetupStartButton', 'SetupLabButton', 'SetupFinishButton',
     'LabPanel', 'LabProfileName', 'LabFullName', 'LabRole', 'LabReuseProfile',
     'LabMattermostURL', 'LabBotToken', 'LabAllowedUserIDs', 'LabHomeChannelID',
@@ -45,6 +45,9 @@ $script:setupStdoutLines = 0
 $script:setupStartedSeen = $false
 $script:setupClosedSeen = $false
 $script:setupLastError = $null
+$script:setupAuthenticated = $false
+$script:setupOAuthURL = $null
+$script:setupOAuthBrowserOpened = $false
 $script:existingInstallSetupAvailable = $false
 $script:existingInstallSetup = $false
 $script:labWorker = $null
@@ -57,9 +60,22 @@ $script:labStderrLines = 0
 $script:labResult = $null
 
 function Get-SelectedSetupMode {
-    $selected = $ui.SetupModeCombo.SelectedItem
-    if ($null -eq $selected) { return 'Portal' }
-    return [string]$selected.Tag
+    return 'Portal'
+}
+
+function Restore-HermesResumablePlanSelection {
+    $prior = Read-HermesInstallState -LiteralPath $script:paths.StateFile
+    if ($null -eq $prior -or @('Running', 'Failed') -cnotcontains [string]$prior.status) { return $false }
+    $selection = Find-HermesInstallPlanOptionsByFingerprint -Fingerprint ([string]$prior.plan_fingerprint) `
+        -HermesHome $script:paths.HermesHome -InstallDir $script:paths.InstallDir -RuntimeRoot $script:paths.RuntimeRoot
+    if ($null -eq $selection) { return $false }
+
+    $targetMode = @($ui.SetupModeCombo.Items | Where-Object { [string]$_.Tag -ceq [string]$selection.SetupMode } | Select-Object -First 1)[0]
+    if ($null -eq $targetMode) { return $false }
+    $ui.IncludeDesktopCheck.IsChecked = [bool]$selection.IncludeDesktop
+    $ui.SkipComputerUseCheck.IsChecked = [bool]$selection.SkipComputerUse
+    $ui.SetupModeCombo.SelectedItem = $targetMode
+    return $true
 }
 
 function Show-WizardPanel {
@@ -73,8 +89,8 @@ function Show-WizardPanel {
         'Welcome' { '1 / 5  PC 확인' }
         'Plan' { '2 / 5  설치 계획과 승인' }
         'Work' { '3 / 5  설치와 검증' }
-        'Setup' { '4 / 5  공식 설정' }
-        default { '5 / 5  연구실 연결' }
+        'Setup' { '4 / 5  Codex 인증과 모델' }
+        default { '5 / 5  에이전트와 연구실 연결' }
     }
 }
 
@@ -105,6 +121,10 @@ function Refresh-Plan {
         $lines.Add("마법사 상태/로그: $($plan.RuntimeRoot)")
         $lines.Add("Desktop 포함: $($plan.IncludeDesktop)")
         $lines.Add("Computer Use 사전 설치 건너뜀: $($plan.SkipComputerUse)")
+        $prior = Read-HermesInstallState -LiteralPath $script:paths.StateFile
+        if ($null -ne $prior -and @('Running', 'Failed') -contains [string]$prior.status -and [string]$prior.plan_fingerprint -ceq [string]$plan.Fingerprint) {
+            $lines.Add('이전 실패 체크포인트: 이 계획과 일치함 — 설치 시작 시 안전 재적용으로 계속합니다.')
+        }
         $lines.Add('')
         foreach ($action in $plan.Actions) { $lines.Add(("{0}. {1} — {2}" -f $action.Order, $action.Name, $action.Detail)) }
         $lines.Add('')
@@ -142,7 +162,7 @@ function Invoke-ReadOnlyDiagnosis {
         }
         $lines.Add('')
         if ($completedExistingInstall) {
-            $lines.Add('이 마법사가 완료한 기존 Hermes 설치를 찾았습니다. 다시 설치하지 않고 공식 설정만 계속할 수 있습니다. 설정 창을 열기 직전에 현재 설치를 다시 검증합니다.')
+            $lines.Add('이 마법사가 완료한 기존 Hermes 설치를 찾았습니다. 다시 설치하지 않고 OpenAI Codex 인증과 연구실 연결을 계속할 수 있습니다.')
             $script:existingInstallSetupAvailable = $true
             $ui.ExistingSetupModeCombo.Visibility = 'Visible'
             $ui.ExistingSetupModeCombo.IsEnabled = $true
@@ -266,6 +286,16 @@ function Start-InstallWorker {
         [Windows.MessageBox]::Show('현재 계획을 먼저 검토하고 동의 체크박스를 선택하세요.', 'Hermes Easy Setup') | Out-Null
         return
     }
+    $prior = Read-HermesInstallState -LiteralPath $script:paths.StateFile
+    if ($null -ne $prior -and @('Running', 'Failed') -contains [string]$prior.status -and [string]$prior.plan_fingerprint -cne $script:approvedPlanFingerprint) {
+        if (Restore-HermesResumablePlanSelection) {
+            Refresh-Plan
+            [Windows.MessageBox]::Show('이전 실패 체크포인트와 일치하는 설치 옵션을 복원했습니다. 계획을 다시 확인하고 동의한 뒤 설치를 시작하세요.', 'Hermes Easy Setup') | Out-Null
+        } else {
+            [Windows.MessageBox]::Show('이전 실패 체크포인트가 현재 설치 계획과 다릅니다. 기존 관리 경로를 새 설치로 덮어쓰지 않았습니다. 진단 ZIP을 만들어 확인하세요.', 'Hermes Easy Setup', 'OK', 'Warning') | Out-Null
+        }
+        return
+    }
     $ui.WorkTitle.Text = 'Hermes를 설치하고 있습니다.'
     $ui.WorkStatus.Text = '승인 계획과 현재 계획을 다시 대조하는 중...'
     $ui.InstallProgress.Value = 0
@@ -292,7 +322,6 @@ function Start-InstallWorker {
     )
     if ([bool]$ui.IncludeDesktopCheck.IsChecked) { $arguments += '-IncludeDesktop' }
     if ([bool]$ui.SkipComputerUseCheck.IsChecked) { $arguments += '-SkipComputerUse' }
-    $prior = Read-HermesInstallState -LiteralPath $script:paths.StateFile
     if ($null -ne $prior -and @('Running', 'Failed') -contains [string]$prior.status -and [string]$prior.plan_fingerprint -eq $script:approvedPlanFingerprint) { $arguments += '-Resume' }
     $argumentLine = ($arguments | ForEach-Object { ConvertTo-WindowsProcessArgument -Argument ([string]$_) }) -join ' '
     $script:worker = Start-Process -FilePath (Get-HermesPowerShellExecutable) -ArgumentList $argumentLine -PassThru -WindowStyle Hidden `
@@ -307,75 +336,95 @@ function Start-InstallWorker {
     $script:timer.Start()
 }
 
+function Show-InstallStartFailure {
+    param([AllowNull()][string]$Message)
+
+    $protectedMessage = Protect-HermesLogText $Message
+    Show-WizardPanel 'Work'
+    $ui.WorkTitle.Text = '설치를 시작할 수 없습니다.'
+    $ui.WorkStatus.Text = $protectedMessage
+    Add-WorkLog $protectedMessage
+    $ui.InstallProgress.IsIndeterminate = $false
+    $ui.FinishButton.IsEnabled = $true
+    $ui.BundleButton.Visibility = 'Visible'
+}
+
 function Open-ExistingInstallSetupStep {
     if (-not $script:existingInstallSetupAvailable) { return }
-    $selected = $ui.ExistingSetupModeCombo.SelectedItem
-    $selectedMode = $(if ($null -eq $selected) { $null } else { [string]$selected.Tag })
-    if (@('Portal', 'Full') -cnotcontains $selectedMode) { return }
-    $targetItem = @($ui.SetupModeCombo.Items | Where-Object { [string]$_.Tag -ceq $selectedMode } | Select-Object -First 1)[0]
-    if ($null -eq $targetItem) { return }
-    $ui.SetupModeCombo.SelectedItem = $targetItem
-    if ((Get-SelectedSetupMode) -cne $selectedMode) { return }
     $script:existingInstallSetup = $true
     Show-SetupStep
 }
 
-function Set-SetupDeferred {
-    $ui.SetupTitle.Text = 'Hermes 설치가 완료되었습니다.'
-    $ui.SetupStatus.Text = '공식 설정은 나중에 진행하도록 선택했습니다.'
-    $ui.SetupDetails.Text = '설치와 검증은 완료되었습니다. 나중에 새 터미널에서 hermes setup을 실행하면 됩니다. Portal 방식을 원하면 hermes setup --portal을 실행하세요.'
-    $ui.SetupLaterButton.Visibility = 'Collapsed'
-    $ui.SetupLaterButton.IsEnabled = $false
-    $ui.SetupStartButton.Visibility = 'Collapsed'
-    $ui.SetupStartButton.IsEnabled = $false
-    $ui.SetupLabButton.IsEnabled = $true
-    $ui.SetupFinishButton.IsEnabled = $true
-    $ui.SetupLabButton.Focus() | Out-Null
+function Refresh-CodexSetupState {
+    $ui.SetupOAuthPanel.Visibility = 'Collapsed'
+    $ui.SetupOAuthCode.Text = ''
+    $script:setupOAuthURL = $null
+    $script:setupOAuthBrowserOpened = $false
+    $previous = $null
+    if ($null -ne $ui.SetupModelCombo.SelectedItem) { $previous = [string]$ui.SetupModelCombo.SelectedItem }
+    try {
+        $status = Get-HermesCodexStatus -HermesHome $script:paths.HermesHome -InstallDir $script:paths.InstallDir -RuntimeRoot $script:paths.RuntimeRoot
+        $script:setupAuthenticated = [bool]$status.LoggedIn
+        $ui.SetupModelCombo.Items.Clear()
+        foreach ($model in @($status.Models)) { [void]$ui.SetupModelCombo.Items.Add([string]$model) }
+        $preferred = $(if (-not [string]::IsNullOrWhiteSpace($previous) -and @($status.Models) -contains $previous) { $previous } elseif (@($status.Models) -contains 'gpt-5.6-terra') { 'gpt-5.6-terra' } else { [string]@($status.Models)[0] })
+        $ui.SetupModelCombo.SelectedItem = $preferred
+        $ui.SetupStatus.Text = $(if ($script:setupAuthenticated) { 'OpenAI Codex 인증을 확인했습니다. 사용할 모델을 선택하세요.' } else { 'OpenAI Codex 로그인이 필요합니다. 아래 버튼을 누르고 브라우저에서 승인하세요.' })
+        $ui.SetupStartButton.Content = $(if ($script:setupAuthenticated) { 'Codex 다시 인증' } else { 'Codex OAuth 로그인' })
+        $ui.SetupStartButton.IsEnabled = $true
+        $ui.SetupModelCombo.IsEnabled = $script:setupAuthenticated
+        $ui.SetupLabButton.IsEnabled = ($script:setupAuthenticated -and $null -ne $ui.SetupModelCombo.SelectedItem)
+        $ui.SetupFinishButton.IsEnabled = $true
+    } catch {
+        $script:setupAuthenticated = $false
+        $ui.SetupStatus.Text = 'Codex 상태 확인 실패: ' + (Protect-HermesLogText $_.Exception.Message)
+        $ui.SetupStartButton.IsEnabled = $false
+        $ui.SetupModelCombo.IsEnabled = $false
+        $ui.SetupLabButton.IsEnabled = $false
+        $ui.SetupFinishButton.IsEnabled = $true
+    }
 }
 
 function Show-SetupStep {
     Show-WizardPanel 'Setup'
-    $ui.SetupLaterButton.Visibility = 'Visible'
-    $ui.SetupStartButton.Visibility = 'Visible'
-    $ui.SetupLaterButton.IsEnabled = $false
+    $ui.SetupTitle.Text = 'OpenAI Codex를 연결합니다.'
+    $ui.SetupDetails.Text = '일반 Hermes 설정 메뉴는 열지 않습니다. OAuth가 필요할 때만 브라우저가 열리며, 인증 토큰은 Hermes가 자체 auth.json에 저장합니다. 이 마법사는 토큰 값을 출력하거나 별도로 보관하지 않습니다.'
     $ui.SetupStartButton.IsEnabled = $false
+    $ui.SetupRefreshButton.IsEnabled = $false
     $ui.SetupLabButton.IsEnabled = $false
     $ui.SetupFinishButton.IsEnabled = $false
-    $ui.SetupStartButton.Content = '공식 설정 시작'
-
-    if ((Get-SelectedSetupMode) -eq 'Later') {
-        Set-SetupDeferred
-        return
-    }
-
-    if ($script:existingInstallSetup) {
-        $ui.SetupTitle.Text = '기존 Hermes 완료 기록에서 공식 설정을 계속합니다.'
-        $ui.SetupStatus.Text = '설정 시작 시 현재 설치의 무결성과 실행 상태를 다시 검증합니다.'
-        $ui.SetupDetails.Text = '검증을 통과한 경우에만 별도의 공식 Hermes 콘솔이 열립니다. 로그인, 모델 선택, API 키 입력은 그 공식 창에서만 진행되며 이 마법사는 콘솔 내용을 읽거나 저장하지 않습니다.'
-    } else {
-        $ui.SetupTitle.Text = 'Hermes 설치가 완료되었습니다. 이제 공식 설정을 진행하세요.'
-        $ui.SetupStatus.Text = '설정 시작을 누르면 별도의 공식 Hermes 콘솔이 열립니다.'
-        $ui.SetupDetails.Text = '로그인, 모델 선택, API 키 입력은 Hermes 공식 콘솔에서만 진행됩니다. 이 마법사는 콘솔 내용을 읽거나 저장하지 않으며, 창이 닫혀도 설정 성공 여부를 단정하지 않습니다.'
-    }
-    $ui.SetupLaterButton.IsEnabled = $true
-    $ui.SetupStartButton.IsEnabled = $true
-    $ui.SetupLabButton.IsEnabled = $true
-    $ui.SetupStartButton.Focus() | Out-Null
+    Refresh-CodexSetupState
+    $ui.SetupRefreshButton.IsEnabled = $true
+    if ($script:setupAuthenticated) { $ui.SetupModelCombo.Focus() | Out-Null } else { $ui.SetupStartButton.Focus() | Out-Null }
 }
 
 function Handle-SetupWorkerEvent {
     param($EventObject)
     if ($null -eq $EventObject) { return }
     $type = [string]$EventObject.type
-    if ($type -ceq 'setup') {
-        $state = [string]$EventObject.state
-        if ($state -ceq 'starting') {
-            $script:setupStartedSeen = $true
-            $ui.SetupStatus.Text = '현재 설치를 검증하고 공식 Hermes 설정 창을 여는 중입니다.'
-        } elseif ($state -ceq 'closed') {
-            $script:setupClosedSeen = $true
-            $ui.SetupStatus.Text = '공식 Hermes 설정 창이 닫혔습니다.'
+    if ($type -ceq 'stage') {
+        $script:setupStartedSeen = $true
+        $ui.SetupStatus.Text = [string]$EventObject.message
+    } elseif ($type -ceq 'oauth') {
+        $url = [string]$EventObject.data.URL
+        $userCode = [string]$EventObject.data.UserCode
+        if ($url -cne 'https://auth.openai.com/codex/device' -or $userCode -cnotmatch '^[A-Z0-9][A-Z0-9-]{3,63}$') {
+            $script:setupLastError = 'OpenAI Codex 인증 주소 또는 코드 형식이 올바르지 않습니다.'
+            $ui.SetupStatus.Text = $script:setupLastError
+            return
         }
+        $script:setupOAuthURL = $url
+        $ui.SetupOAuthCode.Text = $userCode
+        $ui.SetupOAuthPanel.Visibility = 'Visible'
+        $ui.SetupStatus.Text = '브라우저에서 로그인한 뒤 아래 일회용 코드를 입력하세요.'
+        $ui.SetupDetails.Text = '인증 주소: https://auth.openai.com/codex/device' + [Environment]::NewLine + '코드는 로그인에만 사용되며 인증이 끝나면 화면과 임시 파일에서 제거됩니다.'
+        if (-not $script:setupOAuthBrowserOpened) {
+            $script:setupOAuthBrowserOpened = $true
+            try { Start-Process -FilePath $script:setupOAuthURL | Out-Null } catch { $ui.SetupStatus.Text = '브라우저를 자동으로 열지 못했습니다. 인증 페이지 열기 버튼을 누르세요.' }
+        }
+    } elseif ($type -ceq 'complete') {
+        $script:setupClosedSeen = $true
+        $ui.SetupStatus.Text = [string]$EventObject.message
     } elseif ($type -ceq 'error') {
         $script:setupLastError = Protect-HermesLogText ([string]$EventObject.message)
         $ui.SetupStatus.Text = $script:setupLastError
@@ -392,7 +441,7 @@ function Read-SetupTransportFile {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         try {
             $eventObject = $line | ConvertFrom-Json
-            if ([string]$eventObject.type -ceq 'setup' -or [string]$eventObject.type -ceq 'error') {
+            if (@('stage', 'oauth', 'complete', 'error') -contains [string]$eventObject.type) {
                 Handle-SetupWorkerEvent $eventObject
             }
         } catch {
@@ -409,16 +458,6 @@ function Complete-SetupWorker {
     $localSetupWorker.WaitForExit()
     Read-SetupTransportFile
 
-    if ($script:setupStartedSeen -and $script:setupClosedSeen) {
-        $ui.SetupTitle.Text = '공식 Hermes 설정 창이 닫혔습니다.'
-        $ui.SetupStatus.Text = '설정 완료 여부는 이 마법사에서 확인하지 않았습니다.'
-        $ui.SetupDetails.Text = 'Hermes 공식 설정은 취소나 일부 오류 뒤에도 창이 닫힐 수 있습니다. 설정이 끝나지 않았다면 “공식 설정 다시 열기”를 누르세요. 설치와 검증 결과에는 영향이 없습니다.'
-    } else {
-        $ui.SetupTitle.Text = '공식 설정 상태를 확인하지 못했습니다.'
-        $ui.SetupStatus.Text = $(if ([string]::IsNullOrWhiteSpace($script:setupLastError)) { '설정 추적 프로세스가 예상보다 일찍 종료되었습니다.' } else { $script:setupLastError })
-        $ui.SetupDetails.Text = 'Hermes 설치는 이미 완료되었습니다. 공식 설정을 다시 열거나 나중에 터미널에서 hermes setup을 실행할 수 있습니다.'
-    }
-
     $localSetupWorker.Dispose()
     $script:setupWorker = $null
     $script:setupTimer = $null
@@ -426,31 +465,29 @@ function Complete-SetupWorker {
         Remove-Item -LiteralPath $script:setupTransportOut -Force -ErrorAction SilentlyContinue
     }
     $script:setupTransportOut = $null
-    $ui.SetupStartButton.Content = '공식 설정 다시 열기'
-    $ui.SetupStartButton.IsEnabled = $true
-    $ui.SetupLaterButton.IsEnabled = $true
-    $ui.SetupLabButton.IsEnabled = $true
-    $ui.SetupFinishButton.IsEnabled = $true
+    $ui.SetupRefreshButton.IsEnabled = $true
+    Refresh-CodexSetupState
 }
 
 function Start-SetupWorker {
     if ($null -ne $script:setupWorker) { return }
-    if ((Get-SelectedSetupMode) -eq 'Later') {
-        Set-SetupDeferred
-        return
-    }
-
     $script:setupStartedSeen = $false
     $script:setupClosedSeen = $false
     $script:setupLastError = $null
     $script:setupStdoutLines = 0
-    $ui.SetupTitle.Text = '공식 Hermes 설정을 진행 중입니다.'
-    $ui.SetupStatus.Text = '별도의 공식 Hermes 콘솔을 준비하고 있습니다.'
-    $ui.SetupDetails.Text = '로그인과 API 키 입력은 새로 열리는 공식 콘솔에서만 진행하세요. 설정 창이 닫힐 때까지 이 마법사는 상태만 기다립니다.'
+    $script:setupOAuthURL = $null
+    $script:setupOAuthBrowserOpened = $false
+    $ui.SetupOAuthPanel.Visibility = 'Collapsed'
+    $ui.SetupOAuthCode.Text = ''
+    $ui.SetupTitle.Text = 'OpenAI Codex 인증을 진행 중입니다.'
+    $ui.SetupStatus.Text = 'OpenAI에서 일회용 인증 코드를 받고 있습니다.'
+    $ui.SetupDetails.Text = '코드가 준비되면 이 화면에 표시하고 인증 페이지를 자동으로 엽니다. OAuth 토큰은 마법사 화면이나 로그에 표시하지 않습니다.'
     $ui.SetupLaterButton.IsEnabled = $false
     $ui.SetupStartButton.IsEnabled = $false
     $ui.SetupLabButton.IsEnabled = $false
     $ui.SetupFinishButton.IsEnabled = $false
+    $ui.SetupRefreshButton.IsEnabled = $false
+    $ui.SetupModelCombo.IsEnabled = $false
 
     $transportDir = Join-Path $script:paths.RuntimeRoot 'ui-transport'
     if (-not (Test-Path -LiteralPath $transportDir -PathType Container)) { New-Item -ItemType Directory -Path $transportDir -Force | Out-Null }
@@ -458,7 +495,7 @@ function Start-SetupWorker {
     $script:setupTransportOut = Join-Path $transportDir "setup-worker-$stamp.out"
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'HermesEasySetup.ps1'),
-        '-Action', 'Setup', '-WaitForSetup', '-JsonEvents', '-SetupMode', (Get-SelectedSetupMode),
+        '-Action', 'CodexAuth', '-Apply', '-JsonEvents',
         '-HermesHome', $script:paths.HermesHome, '-InstallDir', $script:paths.InstallDir, '-RuntimeRoot', $script:paths.RuntimeRoot
     )
     $argumentLine = ($arguments | ForEach-Object { ConvertTo-WindowsProcessArgument -Argument ([string]$_) }) -join ' '
@@ -470,13 +507,14 @@ function Start-SetupWorker {
         if ($null -ne $script:setupWorker) { $script:setupWorker.Dispose() }
         $script:setupWorker = $null
         $script:setupLastError = Protect-HermesLogText $_.Exception.Message
-        $ui.SetupTitle.Text = '공식 설정을 열 수 없습니다.'
+        $ui.SetupTitle.Text = 'Codex 인증을 시작할 수 없습니다.'
         $ui.SetupStatus.Text = $script:setupLastError
-        $ui.SetupDetails.Text = 'Hermes 설치에는 영향이 없습니다. 공식 설정을 다시 열거나 나중에 hermes setup을 실행하세요.'
-        $ui.SetupStartButton.Content = '공식 설정 다시 열기'
+        $ui.SetupDetails.Text = '설치에는 영향이 없습니다. 상태를 새로고침한 뒤 다시 시도하세요.'
+        $ui.SetupStartButton.Content = 'Codex OAuth 로그인'
         $ui.SetupStartButton.IsEnabled = $true
-        $ui.SetupLaterButton.IsEnabled = $true
-        $ui.SetupLabButton.IsEnabled = $true
+        $ui.SetupRefreshButton.IsEnabled = $true
+        $ui.SetupModelCombo.IsEnabled = $script:setupAuthenticated
+        $ui.SetupLabButton.IsEnabled = $script:setupAuthenticated
         $ui.SetupFinishButton.IsEnabled = $true
         if ($script:setupTransportOut -and (Test-Path -LiteralPath $script:setupTransportOut -PathType Leaf)) {
             Remove-Item -LiteralPath $script:setupTransportOut -Force -ErrorAction SilentlyContinue
@@ -536,6 +574,7 @@ function New-LabInputFromUI {
     $profileName = $ui.LabProfileName.Text.Trim()
     if (-not (Test-HermesLabProfileName -Name $profileName)) { throw 'Profile name은 소문자로 시작하고 소문자·숫자·-·_만 포함한 2~32자로 입력하세요. default는 사용할 수 없습니다.' }
     if ([string]::IsNullOrWhiteSpace($ui.LabFullName.Text)) { throw 'Full name을 입력하세요.' }
+    if (-not $script:setupAuthenticated -or $null -eq $ui.SetupModelCombo.SelectedItem) { throw '이전 단계에서 OpenAI Codex 인증과 모델 선택을 완료하세요.' }
     if ([string]::IsNullOrWhiteSpace($ui.LabMattermostURL.Text)) { throw 'Mattermost Server URL을 입력하세요.' }
     if ([string]::IsNullOrWhiteSpace($ui.LabBotToken.Password)) { throw 'Mattermost Bot token을 입력하세요.' }
     if (-not (Test-HermesNetBirdIPv4 -Address $ui.LabNetBirdIP.Text.Trim())) { throw 'NetBird IPv4를 감지하거나 100.64.0.0/10 주소를 입력하세요.' }
@@ -547,13 +586,11 @@ function New-LabInputFromUI {
         ProfileName = $profileName
         FullName = $ui.LabFullName.Text.Trim()
         Role = [string]$ui.LabRole.Text
+        ModelName = [string]$ui.SetupModelCombo.SelectedItem
         ReuseExistingProfile = [bool]$ui.LabReuseProfile.IsChecked
         MattermostURL = $ui.LabMattermostURL.Text.Trim()
         MattermostToken = [string]$ui.LabBotToken.Password
-        AllowedUserIDs = $ui.LabAllowedUserIDs.Text.Trim()
         HomeChannelID = $ui.LabHomeChannelID.Text.Trim()
-        RequireMention = [bool]$ui.LabRequireMention.IsChecked
-        ReplyMode = Get-SelectedLabReplyMode
         NetBirdIP = $ui.LabNetBirdIP.Text.Trim()
         DashboardPort = $dashboardPort
         DashboardUsername = $ui.LabDashboardUsername.Text.Trim()
@@ -614,6 +651,15 @@ function Complete-LabWorker {
         $ui.LabReuseProfile.IsChecked = $true
     } else {
         Add-LabStatus ("연구실 연결을 완료하지 못했습니다. 종료 코드: $exitCode")
+        $profileName = $ui.LabProfileName.Text.Trim()
+        if (Test-HermesLabProfileName -Name $profileName) {
+            $profilePath = Join-Path (Join-Path $script:paths.HermesHome 'profiles') $profileName
+            if (Test-Path -LiteralPath $profilePath -PathType Container) {
+                $ui.LabReuseProfile.IsChecked = $true
+                $ui.LabApplyButton.Content = '기존 프로필로 다시 시도'
+                Add-LabStatus '입력값은 이 화면에 유지됩니다. 기존 프로필로 다시 시도할 수 있습니다.'
+            }
+        }
     }
     $localWorker.Dispose()
     $script:labWorker = $null
@@ -635,6 +681,20 @@ function Start-LabWorker {
         [Windows.MessageBox]::Show((Protect-HermesLogText $_.Exception.Message), '연구실 연결 입력 확인', 'OK', 'Warning') | Out-Null
         return
     }
+    $approvalMessage = @(
+        '잠시 후 Windows 사용자 계정 컨트롤(UAC)이 한 번 열립니다.'
+        ''
+        'Gateway와 Dashboard를 로그인 전부터 실행하고 매주 자동 업데이트하려면 관리자 승인이 필요합니다.'
+        'UAC 창에서 반드시 [예]를 눌러주세요. [아니요]를 누르면 프로필 설정은 보존되지만 부팅 작업은 만들어지지 않습니다.'
+    ) -join [Environment]::NewLine
+    $approvalChoice = [Windows.MessageBox]::Show(
+        $window,
+        $approvalMessage,
+        '관리자 승인 안내',
+        [Windows.MessageBoxButton]::OKCancel,
+        [Windows.MessageBoxImage]::Information
+    )
+    if ($approvalChoice -ne [Windows.MessageBoxResult]::OK) { return }
     $ui.LabStatus.Text = '연구실 연결 작업을 시작합니다.'
     $ui.LabProgress.Value = 0
     $script:labResult = $null
@@ -678,7 +738,7 @@ function Start-LabWorker {
 $ui.DiagnoseButton.Add_Click({ Invoke-ReadOnlyDiagnosis })
 $ui.ExistingSetupButton.Add_Click({ Open-ExistingInstallSetupStep })
 $ui.WelcomeCloseButton.Add_Click({ $window.Close() })
-$ui.ToPlanButton.Add_Click({ Show-WizardPanel 'Plan'; Refresh-Plan })
+$ui.ToPlanButton.Add_Click({ Restore-HermesResumablePlanSelection | Out-Null; Show-WizardPanel 'Plan'; Refresh-Plan })
 $ui.BackButton.Add_Click({ Show-WizardPanel 'Welcome' })
 $ui.ApprovalCheck.Add_Checked({ $ui.InstallButton.IsEnabled = -not [string]::IsNullOrWhiteSpace($script:approvedPlanFingerprint) })
 $ui.ApprovalCheck.Add_Unchecked({ $ui.InstallButton.IsEnabled = $false })
@@ -687,11 +747,33 @@ $ui.IncludeDesktopCheck.Add_Unchecked({ if ($ui.PlanPanel.Visibility -eq 'Visibl
 $ui.SkipComputerUseCheck.Add_Checked({ if ($ui.PlanPanel.Visibility -eq 'Visible') { Refresh-Plan } })
 $ui.SkipComputerUseCheck.Add_Unchecked({ if ($ui.PlanPanel.Visibility -eq 'Visible') { Refresh-Plan } })
 $ui.SetupModeCombo.Add_SelectionChanged({ if ($ui.PlanPanel.Visibility -eq 'Visible') { Refresh-Plan } })
-$ui.InstallButton.Add_Click({ Start-InstallWorker })
+$ui.InstallButton.Add_Click({
+    try { Start-InstallWorker } catch { Show-InstallStartFailure -Message $_.Exception.Message }
+})
 $ui.FinishButton.Add_Click({ $window.Close() })
-$ui.SetupLaterButton.Add_Click({ Set-SetupDeferred })
+$ui.SetupLaterButton.Add_Click({ })
 $ui.SetupStartButton.Add_Click({ Start-SetupWorker })
-$ui.SetupLabButton.Add_Click({ Show-LabStep })
+$ui.SetupOpenOAuthButton.Add_Click({
+    if ($script:setupOAuthURL -ceq 'https://auth.openai.com/codex/device') {
+        try { Start-Process -FilePath $script:setupOAuthURL | Out-Null } catch { $ui.SetupStatus.Text = '브라우저를 열지 못했습니다. 기본 브라우저 설정을 확인하세요.' }
+    }
+})
+$ui.SetupRefreshButton.Add_Click({ Refresh-CodexSetupState })
+$ui.SetupModelCombo.Add_SelectionChanged({ $ui.SetupLabButton.IsEnabled = ($script:setupAuthenticated -and $null -ne $ui.SetupModelCombo.SelectedItem) })
+$ui.SetupLabButton.Add_Click({
+    if (-not $script:setupAuthenticated -or $null -eq $ui.SetupModelCombo.SelectedItem) { return }
+    try {
+        Show-LabStep
+    } catch {
+        $script:setupLastError = Protect-HermesLogText $_.Exception.Message
+        Show-WizardPanel 'Setup'
+        $ui.SetupStatus.Text = '에이전트 설정 화면을 열지 못했습니다.'
+        $ui.SetupDetails.Text = $script:setupLastError
+        $ui.SetupRefreshButton.IsEnabled = $true
+        $ui.SetupLabButton.IsEnabled = $true
+        $ui.SetupFinishButton.IsEnabled = $true
+    }
+})
 $ui.SetupFinishButton.Add_Click({ $window.Close() })
 $ui.LabBackButton.Add_Click({ Show-WizardPanel 'Setup' })
 $ui.LabCloseButton.Add_Click({ $window.Close() })
@@ -716,7 +798,7 @@ $window.Add_Closing({ param($sender, $eventArgs)
         [Windows.MessageBox]::Show('설치 단계가 실행 중입니다. 각 단계에는 제한 시간이 있으며, 현재 프로세스 트리를 임의 종료하지 않도록 창을 닫지 않습니다.', 'Hermes Easy Setup') | Out-Null
     } elseif ($null -ne $script:setupWorker -and -not $script:setupWorker.HasExited) {
         $eventArgs.Cancel = $true
-        [Windows.MessageBox]::Show('공식 Hermes 설정 창이 실행 중입니다. 입력 내용을 잃지 않도록 그 설정 창을 먼저 닫아 주세요.', 'Hermes Easy Setup') | Out-Null
+        [Windows.MessageBox]::Show('OpenAI Codex 인증이 진행 중입니다. 브라우저 승인이 끝날 때까지 창을 닫지 않습니다.', 'Hermes Easy Setup') | Out-Null
     } elseif ($null -ne $script:labWorker -and -not $script:labWorker.HasExited) {
         $eventArgs.Cancel = $true
         [Windows.MessageBox]::Show('연구실 연결 작업이 실행 중입니다. 프로필과 서비스 구성이 끝날 때까지 창을 닫지 않습니다.', 'Hermes Easy Setup') | Out-Null

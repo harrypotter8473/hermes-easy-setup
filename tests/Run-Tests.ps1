@@ -87,6 +87,11 @@ try {
     Assert-True ($trailingPaths.HermesHome -ceq $planA.HermesHome -and $trailingPaths.InstallDir -ceq $planA.InstallDir -and $trailingPaths.RuntimeRoot -ceq $planA.RuntimeRoot -and $rootPaths.HermesHome -ceq 'C:\') 'directory paths remove trailing separators without corrupting drive roots'
     Assert-Equal $planA.Fingerprint $planB.Fingerprint 'plan fingerprint deterministic'
     Assert-True ($planA.Fingerprint -ne $planC.Fingerprint) 'material option changes fingerprint'
+    $resolvedPlanOptions = Find-HermesInstallPlanOptionsByFingerprint -Fingerprint $planA.Fingerprint -HermesHome $planA.HermesHome -InstallDir $planA.InstallDir -RuntimeRoot $planA.RuntimeRoot
+    $unresolvedPlanOptions = Find-HermesInstallPlanOptionsByFingerprint -Fingerprint ('F' * 64) -HermesHome $planA.HermesHome -InstallDir $planA.InstallDir -RuntimeRoot $planA.RuntimeRoot
+    $invalidPlanOptions = Find-HermesInstallPlanOptionsByFingerprint -Fingerprint 'not-a-fingerprint' -HermesHome $planA.HermesHome -InstallDir $planA.InstallDir -RuntimeRoot $planA.RuntimeRoot
+    Assert-True ($null -ne $resolvedPlanOptions -and -not $resolvedPlanOptions.IncludeDesktop -and -not $resolvedPlanOptions.SkipComputerUse -and [string]$resolvedPlanOptions.SetupMode -ceq 'Portal') 'failed plan fingerprint resolves to its exact material option selection'
+    Assert-True ($null -eq $unresolvedPlanOptions -and $null -eq $invalidPlanOptions) 'unknown or malformed plan fingerprints do not resolve'
     $existingSetupPaths = [pscustomobject]@{
         HermesHome = $planA.HermesHome
         InstallDir = $planA.InstallDir
@@ -158,6 +163,13 @@ try {
         (Test-HermesCompletedInstallForSetup -Diagnosis $eligibleDiagnosis -State $failedChecksState -Paths $existingSetupPaths -ExpectedCommit $planA.SourceCommit)
     )
     Assert-True (@($stateRejects | Where-Object { $_.Eligible }).Count -eq 0) 'setup-only route rejects null, stale, malformed, unverified, or path-mismatched completed state'
+    $resumeEnvelope = ($eligibleState | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $resumeEnvelope.status = 'Failed'
+    $resumeEnvelope | Add-Member -NotePropertyName plan_fingerprint -NotePropertyValue $planA.Fingerprint
+    $resumeWrongPath = ($resumeEnvelope | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    $resumeWrongPath.runtime_root = (Join-Path $testRootFull 'wrong-resume-runtime')
+    Assert-True (Test-HermesStateMatchesResumeEnvelope -State $resumeEnvelope -Plan $planA) 'resume envelope accepts the exact failed plan, source, and paths'
+    Assert-True (-not (Test-HermesStateMatchesResumeEnvelope -State $resumeWrongPath -Plan $planA)) 'resume envelope rejects a path-mismatched checkpoint'
 
 
     $validWorkerCompletion = [pscustomobject]@{
@@ -207,8 +219,18 @@ try {
     Assert-True (-not $laterSetupResult.Started -and -not $laterSetupResult.Exited -and $null -eq $laterSetupResult.ExitCode -and $null -eq $laterSetupResult.ProcessId -and [string]$laterSetupResult.Mode -ceq 'Later' -and $null -eq $laterSetupResult.Command) 'Later setup returns the fixed no-process outcome without verification or launch'
 
     $systemPowerShellForSetupTest = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $setupEventLines = @(& $systemPowerShellForSetupTest -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $projectRoot 'HermesEasySetup.ps1') -Action Setup -HermesHome $planA.HermesHome -InstallDir $planA.InstallDir -RuntimeRoot $planA.RuntimeRoot -SetupMode Later -WaitForSetup -JsonEvents)
-    $setupEventExit = $LASTEXITCODE
+    $setupEventOut = Join-Path $testRootFull 'setup-events.out'
+    $setupEventErr = Join-Path $testRootFull 'setup-events.err'
+    $setupArguments = @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $projectRoot 'HermesEasySetup.ps1'),
+        '-Action', 'Setup', '-HermesHome', $planA.HermesHome, '-InstallDir', $planA.InstallDir,
+        '-RuntimeRoot', $planA.RuntimeRoot, '-SetupMode', 'Later', '-WaitForSetup', '-JsonEvents'
+    )
+    $setupArgumentLine = ($setupArguments | ForEach-Object { ConvertTo-WindowsProcessArgument -Argument ([string]$_) }) -join ' '
+    $setupProcess = Start-Process -FilePath $systemPowerShellForSetupTest -ArgumentList $setupArgumentLine -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $setupEventOut -RedirectStandardError $setupEventErr
+    $setupEventExit = [int]$setupProcess.ExitCode
+    $setupProcess.Dispose()
+    $setupEventLines = @([System.IO.File]::ReadAllLines($setupEventOut, [System.Text.Encoding]::UTF8))
     $setupEvents = @($setupEventLines | ForEach-Object { $_ | ConvertFrom-Json })
     $startingSetupEventValid = $false
     $closedSetupEventValid = $false
@@ -352,7 +374,7 @@ try {
         $gitExcludesPath = Join-Path $planA.RuntimeRoot ("git-excludes-$token.txt")
         $attributesConfigValue = ([System.IO.Path]::GetFullPath($gitAttributesPath)).Replace('\', '/').Replace('"', '\"')
         $excludesConfigValue = ([System.IO.Path]::GetFullPath($gitExcludesPath)).Replace('\', '/').Replace('"', '\"')
-        $gitConfigText = "[core]`n`tautocrlf = false`n`tattributesFile = `"$attributesConfigValue`"`n`texcludesFile = `"$excludesConfigValue`"`n`thooksPath = NUL`n`tfsmonitor = false`n"
+        $gitConfigText = "[core]`n`tautocrlf = false`n`tlongpaths = true`n`tattributesFile = `"$attributesConfigValue`"`n`texcludesFile = `"$excludesConfigValue`"`n`thooksPath = NUL`n`tfsmonitor = false`n"
         Assert-Equal $planA.HermesHome $repositoryEnvironment['HERMES_HOME'] 'stage environment preserves HERMES_HOME'
         Assert-True ($repositoryEnvironment.ContainsKey('GIT_CONFIG_GLOBAL')) 'fresh repository stage receives managed global Git config'
         Assert-True ($gitConfigPath.StartsWith(([System.IO.Path]::GetFullPath($planA.RuntimeRoot).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) 'managed Git config stays inside RuntimeRoot'
@@ -464,6 +486,7 @@ try {
     Assert-True ([string]$uvEnvironment['PATH'] -like "$trustedGitPathPrefix*") 'later automatic stage PATH starts with Program Files Git'
     Assert-True ($uvEnvironment.ContainsKey('GIT_CONFIG_GLOBAL') -and (Test-Path -LiteralPath ([string]$uvEnvironment['GIT_CONFIG_GLOBAL']) -PathType Leaf)) 'later automatic stage receives managed global config'
     Assert-True ($uvEnvironment.ContainsKey('GIT_COMMON_DIR') -and $null -eq $uvEnvironment['GIT_COMMON_DIR']) 'later automatic stage removes ambient common directory'
+    Assert-True ((Get-Content -LiteralPath ([string]$uvEnvironment['GIT_CONFIG_GLOBAL']) -Raw) -cmatch '(?m)^\s*longpaths = true$') 'managed Git config enables long Windows checkout paths'
     $stageProfilePrefix = [System.IO.Path]::GetFullPath($planA.RuntimeRoot).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar + 'stage-profile-'
     Assert-True ([string]$uvEnvironment['USERPROFILE'] -like "$stageProfilePrefix*" -and
         [string]::Equals([string]$uvEnvironment['HOME'], [string]$uvEnvironment['USERPROFILE'], [StringComparison]::OrdinalIgnoreCase) -and
@@ -474,14 +497,18 @@ try {
         [string]$uvEnvironment['UV_TOOL_DIR'] -ceq [System.IO.Path]::GetFullPath((Join-Path $planA.HermesHome 'uv-tools')) -and
         [string]$uvEnvironment['UV_TOOL_BIN_DIR'] -ceq [System.IO.Path]::GetFullPath((Join-Path $planA.HermesHome 'bin')) -and
         [string]$uvEnvironment['PLAYWRIGHT_BROWSERS_PATH'] -ceq '0') 'uv cannot modify User PATH or discover registry Python, while tool and browser environments remain in stable managed locations'
-    $hostileEnvironmentNames = @('NODE_OPTIONS', 'NODE_PATH', 'PYTHONPATH', 'PYTHONHOME', 'BASH_ENV', 'ENV', 'NPM_CONFIG_SCRIPT_SHELL', 'GIT_SSH_COMMAND')
+    $pythonStageEnvironment = New-HermesStageEnvironment -Plan $planA -Stage 'python'
+    Assert-True ([string]$pythonStageEnvironment['UV_NO_PROJECT'] -ceq '1' -and $null -eq $pythonStageEnvironment['VIRTUAL_ENV'] -and
+        $null -eq $pythonStageEnvironment['UV_PROJECT'] -and $null -eq $pythonStageEnvironment['UV_PROJECT_ENVIRONMENT'] -and
+        $null -eq $pythonStageEnvironment['CONDA_PREFIX']) 'Python bootstrap does not inherit an ambient project or virtual environment'
+    $hostileEnvironmentNames = @('NODE_OPTIONS', 'NODE_PATH', 'PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV', 'UV_PROJECT', 'UV_PROJECT_ENVIRONMENT', 'UV_PYTHON', 'CONDA_PREFIX', 'CONDA_DEFAULT_ENV', 'PIPENV_ACTIVE', 'POETRY_ACTIVE', 'BASH_ENV', 'ENV', 'NPM_CONFIG_SCRIPT_SHELL', 'GIT_SSH_COMMAND')
     $hostileEnvironmentPrevious = @{}
     try {
         foreach ($name in $hostileEnvironmentNames) {
             $hostileEnvironmentPrevious[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
             [Environment]::SetEnvironmentVariable($name, (Join-Path $testRootFull ("hostile-$name")), [EnvironmentVariableTarget]::Process)
         }
-        $isolationProbeCommand = '$names=@("NODE_OPTIONS","NODE_PATH","PYTHONPATH","PYTHONHOME","BASH_ENV","ENV","NPM_CONFIG_SCRIPT_SHELL");if(@($names|Where-Object{Test-Path "Env:$_"}).Count -eq 0 -and $env:GIT_SSH_COMMAND -eq $null){[Console]::Out.WriteLine("isolated")}else{[Console]::Out.WriteLine("inherited")}'
+        $isolationProbeCommand = '$names=@("NODE_OPTIONS","NODE_PATH","PYTHONPATH","PYTHONHOME","VIRTUAL_ENV","UV_PROJECT","UV_PROJECT_ENVIRONMENT","UV_PYTHON","CONDA_PREFIX","CONDA_DEFAULT_ENV","PIPENV_ACTIVE","POETRY_ACTIVE","BASH_ENV","ENV","NPM_CONFIG_SCRIPT_SHELL");if(@($names|Where-Object{Test-Path "Env:$_"}).Count -eq 0 -and $env:GIT_SSH_COMMAND -eq $null){[Console]::Out.WriteLine("isolated")}else{[Console]::Out.WriteLine("inherited")}'
         $isolationProbe = Invoke-HermesProcess -FilePath (Get-HermesPowerShellExecutable) -ArgumentList @('-NoLogo', '-NoProfile', '-Command', $isolationProbeCommand) -Environment $uvEnvironment -TimeoutSeconds 30
         Assert-True ($isolationProbe.ExitCode -eq 0 -and $isolationProbe.StdOut.Trim() -ceq 'isolated') 'replacement environment blocks inherited Node, Python, shell, npm, and Git injection variables'
     } finally {
@@ -494,9 +521,24 @@ try {
     $uvStageConfigPath = [string]$uvEnvironment['GIT_CONFIG_GLOBAL']
     $gitStageProfilePath = [string]$gitStageEnvironment['HERMES_EASY_SETUP_STAGE_PROFILE']
     $uvStageProfilePath = [string]$uvEnvironment['HERMES_EASY_SETUP_STAGE_PROFILE']
+    $pythonStageProfilePath = [string]$pythonStageEnvironment['HERMES_EASY_SETUP_STAGE_PROFILE']
     Remove-HermesStageEnvironmentArtifacts -Environment $gitStageEnvironment -Plan $planA
     Remove-HermesStageEnvironmentArtifacts -Environment $uvEnvironment -Plan $planA
-    Assert-True (-not (Test-Path -LiteralPath $gitStageConfigPath) -and -not (Test-Path -LiteralPath $uvStageConfigPath) -and -not (Test-Path -LiteralPath $gitStageProfilePath) -and -not (Test-Path -LiteralPath $uvStageProfilePath)) 'automatic stage Git files and isolated profiles are removed'
+    Remove-HermesStageEnvironmentArtifacts -Environment $pythonStageEnvironment -Plan $planA
+    Assert-True (-not (Test-Path -LiteralPath $gitStageConfigPath) -and -not (Test-Path -LiteralPath $uvStageConfigPath) -and -not (Test-Path -LiteralPath $gitStageProfilePath) -and -not (Test-Path -LiteralPath $uvStageProfilePath) -and -not (Test-Path -LiteralPath $pythonStageProfilePath)) 'automatic stage Git files and isolated profiles are removed'
+
+    $uvRepairRoot = Join-Path $testRootFull 'uv-junction-repair'
+    $uvRepairHome = Join-Path $uvRepairRoot 'home'
+    $uvRepairPythonRoot = Join-Path $uvRepairHome 'python'
+    $uvRepairTarget = Join-Path $uvRepairPythonRoot 'cpython-3.11.16-windows-x86_64-none'
+    $uvRepairLink = Join-Path $uvRepairPythonRoot 'cpython-3.11-windows-x86_64-none'
+    New-Item -ItemType Directory -Path $uvRepairTarget -Force | Out-Null
+    Copy-Item -LiteralPath $signedSystemGit -Destination (Join-Path $uvRepairTarget 'python.exe') -Force
+    New-Item -ItemType Junction -Path $uvRepairLink -Target $uvRepairTarget | Out-Null
+    $uvRepairPlan = [pscustomobject]@{ HermesHome = $uvRepairHome }
+    $uvRepair = Convert-HermesBrokenUvPythonMinorJunction -Plan $uvRepairPlan -PythonVersion '3.11'
+    Assert-True ($uvRepair.Changed -and (Test-Path -LiteralPath (Join-Path $uvRepairLink 'python.exe') -PathType Leaf) -and
+        -not (Test-Path -LiteralPath $uvRepairTarget) -and ((Get-Item -LiteralPath $uvRepairLink -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) 'broken uv managed-Python junction is materialized as an ordinary verified directory'
 
     $freshGuardHome = Join-Path $testRootFull 'fresh-command-guard-home'
     $freshGuardRuntime = Join-Path $testRootFull 'fresh-command-guard-runtime'
@@ -538,6 +580,26 @@ try {
         }
     }
     Assert-Equal $freshPreplantPaths.Count $freshPreplantRejected 'fresh install rejects every exact managed command, browser backend, and Python preplant'
+    $resumeRecoveryHome = Join-Path $testRootFull 'resume-recovery-home'
+    $resumeRecoveryRuntime = Join-Path $testRootFull 'resume-recovery-runtime'
+    $resumeRecoveryPlan = New-HermesInstallPlan -HermesHome $resumeRecoveryHome -RuntimeRoot $resumeRecoveryRuntime -SkipComputerUse
+    $resumeRecoveryState = [pscustomobject]@{
+        schema_version = 2; status = 'Failed'; plan_fingerprint = $resumeRecoveryPlan.Fingerprint
+        source_commit = $resumeRecoveryPlan.SourceCommit; hermes_home = $resumeRecoveryPlan.HermesHome
+        install_dir = $resumeRecoveryPlan.InstallDir; runtime_root = $resumeRecoveryPlan.RuntimeRoot
+    }
+    New-Item -ItemType Directory -Path (Join-Path $resumeRecoveryHome 'bin') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $resumeRecoveryHome 'python') -Force | Out-Null
+    New-Item -ItemType Directory -Path $resumeRecoveryPlan.InstallDir -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $resumeRecoveryRuntime 'state') -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $resumeRecoveryHome 'bin\uv.exe'), 'managed uv', (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::WriteAllText((Join-Path $resumeRecoveryHome '.env'), 'PRESERVE=true', (New-Object System.Text.UTF8Encoding $false))
+    [System.IO.File]::WriteAllText((Join-Path $resumeRecoveryRuntime 'state\launcher-attestation-v1.json'), '{"stale":true}', (New-Object System.Text.UTF8Encoding $false))
+    $resumeRecovery = & $installEngineModule { param($plan, $state) Move-HermesResumeManagedSeedToQuarantine -Plan $plan -State $state } $resumeRecoveryPlan $resumeRecoveryState
+    $resumeRecoveryClean = $true
+    try { & $installEngineModule { param($plan) Assert-HermesFreshManagedCommandSeed -Plan $plan -PathValues @() } $resumeRecoveryPlan } catch { $resumeRecoveryClean = $false }
+    Assert-True ($resumeRecovery.Changed -and $resumeRecovery.Items.Count -eq 4 -and (Test-Path -LiteralPath (Join-Path $resumeRecovery.Root 'recovery.json') -PathType Leaf) -and -not (Test-Path -LiteralPath (Join-Path $resumeRecoveryRuntime 'state\launcher-attestation-v1.json'))) 'failed early install moves exact managed outputs and stale launcher attestation into a recoverable quarantine'
+    Assert-True ($resumeRecoveryClean -and (Test-Path -LiteralPath (Join-Path $resumeRecoveryHome '.env') -PathType Leaf)) 'resume recovery restores the fresh command boundary while preserving user configuration'
     $ambientCuaDirectory = Join-Path $testRootFull 'ambient-cua-driver'
     New-Item -ItemType Directory -Path $ambientCuaDirectory -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $ambientCuaDirectory 'cua-driver.cmd'), '@exit /b 0', (New-Object System.Text.ASCIIEncoding))
@@ -1009,6 +1071,13 @@ try {
     $startFailure = Invoke-HermesProcess -FilePath $missingExecutable -ArgumentList @('--version') -TimeoutSeconds 30
     Assert-True (-not $startFailure.Started -and $startFailure.ExitCode -eq -1 -and $startFailure.StartFailure -ceq 'ProcessStartFailed' -and -not $startFailure.TimedOut) 'Process.Start failure returns a structured diagnostic result'
 
+    $streamLines = New-Object 'System.Collections.Generic.List[string]'
+    $streamCallback = { param($streamName, $line); [void]$streamLines.Add(([string]$streamName + '|' + [string]$line)) }.GetNewClosure()
+    $streamProbeCommand = '[Console]::Out.WriteLine("DEVICE-READY");[Console]::Out.Flush();Start-Sleep -Milliseconds 100;[Console]::Error.WriteLine("STREAM-DONE");exit 0'
+    $streamResult = Invoke-HermesProcess -FilePath (Get-HermesPowerShellExecutable) -ArgumentList @('-NoLogo', '-NoProfile', '-Command', $streamProbeCommand) -TimeoutSeconds 30 -OutputLineCallback $streamCallback
+    Assert-True ($streamResult.ExitCode -eq 0 -and $streamLines.Contains('StdOut|DEVICE-READY') -and $streamLines.Contains('StdErr|STREAM-DONE')) 'process output callback receives live stdout and stderr lines'
+    Assert-True ($streamResult.StdOut.Trim() -ceq 'DEVICE-READY' -and $streamResult.StdErr.Trim() -ceq 'STREAM-DONE') 'streaming process result retains bounded captured output'
+
     $frameText = 'noise' + [Environment]::NewLine + '{"stage":"one","ok":true}' + [Environment]::NewLine + 'more'
     $frame = ConvertFrom-HermesJsonFrame -Text $frameText -RequiredProperty 'stage'
     Assert-Equal 'one' $frame.stage 'last valid JSON frame parsed'
@@ -1107,10 +1176,36 @@ try {
     Assert-True ($xamlText -match 'x:Name="ApprovalCheck"') 'GUI has explicit approval control'
     Assert-True ($xamlText -match 'x:Name="InstallButton"[^>]*IsEnabled="False"') 'GUI install starts disabled'
     Assert-True ($xamlText -match 'x:Name="LabPanel"') 'GUI includes the fifth-step lab integration panel'
+    Assert-True ($xamlText -match 'x:Name="SetupModelCombo"') 'GUI includes an in-wizard Codex model selector'
+    Assert-True ($xamlText -match 'x:Name="SetupOAuthCode"' -and $xamlText -match 'x:Name="SetupOpenOAuthButton"') 'GUI displays the Codex device code and fixed browser action'
+    Assert-True ($xamlText -notmatch 'Nous Portal|OpenRouter|Discord|Slack|Telegram|Spotify') 'GUI excludes unrelated provider and messaging setup choices'
+    $codexModuleText = Get-Content -Raw (Join-Path $projectRoot 'src\HermesEasySetup.Codex.psm1')
+    Assert-True ($codexModuleText -match "PYTHONUNBUFFERED.*=.*'1'" -and $codexModuleText -match "-Type 'oauth'") 'Codex OAuth streams its device code to a dedicated wizard event'
+    Assert-True ($codexModuleText -match 'Test-HermesInstallation[^\r\n]+-StaticOnly' -and $codexModuleText -match '\$verification\.StaticProvenanceValid') 'Codex status refresh uses static provenance and never blocks on Hermes doctor'
+    $labModuleText = Get-Content -Raw (Join-Path $projectRoot 'src\HermesEasySetup.Lab.psm1')
+    Assert-True ($labModuleText -match "MATTERMOST_ALLOW_ALL_USERS = 'true'") 'lab setup fixes Mattermost authorization to open lab access'
+    Assert-True ($labModuleText -match "MATTERMOST_REQUIRE_MENTION = 'true'") 'lab setup requires mentions in channels'
+    Assert-True ($labModuleText -match "MATTERMOST_REPLY_MODE = 'off'") 'lab setup preserves flat channel replies and existing threads'
+    Assert-True ($labModuleText -match 'New-ScheduledTaskTrigger -AtStartup') 'lab setup registers gateway and dashboard at Windows boot'
+    Assert-True ($labModuleText -match 'New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 4:00am') 'lab setup registers the fixed weekly update schedule'
+    Assert-True ($labModuleText -match '-LogonType S4U -RunLevel Limited') 'boot tasks run as the current non-elevated user without storing a password'
+    Assert-True ($labModuleText -match 'Wait-HermesScheduledTaskRunning') 'lab setup verifies the custom gateway task reaches running state'
+    Assert-True ($labModuleText -notmatch "-p \{1\} gateway restart") 'weekly updater restarts the registered gateway task instead of an unrelated Hermes service'
+    Assert-True ($labModuleText -match 'GIT_CONFIG_VALUE_0 = \{0\}.*\$installDir') 'scheduled runners trust only the exact Hermes checkout path'
     Assert-True (Test-HermesLabProfileName -Name 'albus') 'lab profile validation accepts a separated named profile'
     Assert-True (-not (Test-HermesLabProfileName -Name 'default')) 'lab profile validation rejects the shared default profile'
     Assert-True (Test-HermesNetBirdIPv4 -Address '100.69.181.62') 'NetBird CGNAT IPv4 is accepted'
     Assert-True (-not (Test-HermesNetBirdIPv4 -Address '192.168.0.19')) 'ordinary private IPv4 is not mistaken for NetBird'
+    Assert-True ($labModuleText -match "PSObject\.Properties\['InterfaceDescription'\]") 'NetBird discovery tolerates Get-NetIPAddress rows without InterfaceDescription'
+    $netBirdProbeThrew = $false
+    try { $null = Get-HermesNetBirdIPv4 } catch { $netBirdProbeThrew = $true }
+    Assert-True (-not $netBirdProbeThrew) 'NetBird discovery never throws on the current Windows network adapter schema'
+    $labModule = Get-Module HermesEasySetup.Lab
+    $labEnvFixture = Join-Path $testRootFull 'existing-profile.env'
+    [System.IO.File]::WriteAllText($labEnvFixture, ('TERMINAL_ENV=local' + [Environment]::NewLine), (New-Object System.Text.UTF8Encoding($false)))
+    & $labModule { param($LiteralPath) Set-HermesLabEnvFile -LiteralPath $LiteralPath -Values @{ MATTERMOST_URL = 'http://100.69.181.62:8065' } } $labEnvFixture
+    $labEnvFixtureLines = [System.IO.File]::ReadAllLines($labEnvFixture)
+    Assert-True ($labEnvFixtureLines -contains 'TERMINAL_ENV=local' -and $labEnvFixtureLines -contains 'MATTERMOST_URL=http://100.69.181.62:8065') 'Lab env writer atomically updates an existing profile env file without a backup path error'
     $labInputPath = Join-Path $testRootFull 'lab-input.bin'
     $labInput = [pscustomobject]@{ ProfileName = 'albus'; MattermostToken = 'lab-secret-token'; DashboardPassword = 'lab-secret-password' }
     Protect-HermesLabInput -Value $labInput -LiteralPath $labInputPath | Out-Null

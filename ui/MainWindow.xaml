@@ -45,12 +45,11 @@
           <ComboBox x:Name="ExistingSetupModeCombo" Width="155" Height="38" Margin="0,0,10,0"
                     SelectedIndex="0" Visibility="Collapsed" IsEnabled="False"
                     AutomationProperties.Name="기존 Hermes 설치 설정 방식">
-            <ComboBoxItem Tag="Portal" Content="Nous Portal"/>
-            <ComboBoxItem Tag="Full" Content="전체 설정"/>
+            <ComboBoxItem Tag="Portal" Content="OpenAI Codex"/>
           </ComboBox>
           <Button x:Name="ExistingSetupButton" Width="180" Height="38" Margin="0,0,10,0"
                   Content="기존 설치 설정 계속" Visibility="Collapsed" IsEnabled="False"
-                  AutomationProperties.Name="기존 Hermes 설치 공식 설정 계속"/>
+                  AutomationProperties.Name="기존 Hermes 설치 Codex 설정 계속"/>
           <Button x:Name="WelcomeCloseButton" Width="110" Height="38" Margin="0,0,10,0" Content="닫기" IsCancel="True"/>
           <Button x:Name="ToPlanButton" Width="150" Height="38" Content="설치 계획 보기" IsEnabled="False"/>
         </StackPanel>
@@ -72,11 +71,13 @@
                       Content="Computer Use 사전 설치 건너뛰기 (v0.1.2 보안 정책)"/>
           </StackPanel>
           <StackPanel Grid.Column="1">
-            <TextBlock Text="설치 후 공급자 설정"/>
-            <ComboBox x:Name="SetupModeCombo" Margin="0,6,0,0" SelectedIndex="0" AutomationProperties.Name="설치 후 공급자 설정 방식">
-              <ComboBoxItem Tag="Portal" Content="Nous Portal — 브라우저 로그인 및 모델 선택 (권장)"/>
-              <ComboBoxItem Tag="Full" Content="전체 설정 — 공식 터미널 마법사"/>
-              <ComboBoxItem Tag="Later" Content="나중에 설정"/>
+            <TextBlock Text="AI 공급자"/>
+            <TextBlock Margin="0,7,0,0" FontWeight="SemiBold" Text="OpenAI Codex (고정)"/>
+            <TextBlock Margin="0,4,0,0" FontSize="12" TextWrapping="Wrap"
+                       Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
+                       Text="설치 후 이 마법사 안에서 OAuth 인증과 모델을 선택합니다."/>
+            <ComboBox x:Name="SetupModeCombo" Visibility="Collapsed" SelectedIndex="0" AutomationProperties.Name="내부 설치 계획 호환 모드">
+              <ComboBoxItem Tag="Portal" Content="OpenAI Codex"/>
             </ComboBox>
           </StackPanel>
         </Grid>
@@ -126,25 +127,50 @@
           <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         <StackPanel>
-          <TextBlock x:Name="SetupTitle" Text="Hermes 설치가 완료되었습니다." FontSize="20" FontWeight="SemiBold"/>
-          <TextBlock x:Name="SetupStatus" Margin="0,8,0,0" Text="공식 설정을 시작할 준비가 되었습니다." TextWrapping="Wrap"
-                     AutomationProperties.Name="Hermes 공식 설정 상태" AutomationProperties.LiveSetting="Polite"/>
+          <TextBlock x:Name="SetupTitle" Text="OpenAI Codex를 연결합니다." FontSize="20" FontWeight="SemiBold"/>
+          <TextBlock x:Name="SetupStatus" Margin="0,8,0,0" Text="인증 상태를 확인하고 있습니다." TextWrapping="Wrap"
+                     AutomationProperties.Name="OpenAI Codex 인증 상태" AutomationProperties.LiveSetting="Polite"/>
         </StackPanel>
         <Border Grid.Row="1" Margin="0,18,0,0" Padding="16" CornerRadius="5"
                 BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" BorderThickness="1"
                 Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}">
-          <TextBlock x:Name="SetupDetails" TextWrapping="Wrap"
-                     Text="설정 시작을 누르면 별도의 공식 Hermes 콘솔이 열립니다. 로그인과 API 키 입력은 그 창에서만 진행됩니다."
-                     AutomationProperties.Name="Hermes 공식 설정 안내"/>
+          <StackPanel>
+            <TextBlock Text="Provider: OpenAI Codex" FontWeight="SemiBold" FontSize="16"/>
+            <TextBlock x:Name="SetupDetails" Margin="0,8,0,0" TextWrapping="Wrap"
+                       Text="OAuth 로그인 버튼을 누르면 일회용 코드를 받아 브라우저를 엽니다. 마법사는 OAuth 토큰을 표시하거나 별도로 저장하지 않습니다."
+                       AutomationProperties.Name="OpenAI Codex 설정 안내"/>
+            <Border x:Name="SetupOAuthPanel" Margin="0,18,0,0" Padding="14" Visibility="Collapsed" CornerRadius="4"
+                    BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}" BorderThickness="1"
+                    Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}">
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="150"/></Grid.ColumnDefinitions>
+                <TextBlock VerticalAlignment="Center" FontWeight="SemiBold" Text="일회용 인증 코드"/>
+                <TextBox x:Name="SetupOAuthCode" Grid.Column="1" Height="38" Padding="10,6" IsReadOnly="True"
+                         FontFamily="Consolas" FontSize="17" FontWeight="SemiBold"
+                         AutomationProperties.Name="OpenAI Codex 일회용 인증 코드"/>
+                <Button x:Name="SetupOpenOAuthButton" Grid.Column="3" Height="38" Content="인증 페이지 열기"
+                        AutomationProperties.Name="OpenAI Codex 인증 페이지 열기"/>
+              </Grid>
+            </Border>
+            <Grid Margin="0,20,0,0">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="170"/><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="130"/></Grid.ColumnDefinitions>
+              <TextBlock VerticalAlignment="Center" Text="기본 Codex 모델"/>
+              <ComboBox x:Name="SetupModelCombo" Grid.Column="1" Height="34" AutomationProperties.Name="기본 Codex 모델"/>
+              <Button x:Name="SetupRefreshButton" Grid.Column="3" Height="34" Content="상태 새로고침"/>
+            </Grid>
+            <TextBlock Margin="0,14,0,0" FontSize="12" TextWrapping="Wrap"
+                       Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
+                       Text="고정값: 로컬 터미널, 도구 진행은 로그에만 기록, 압축 임계값 85%, 자동 세션 초기화 없음"/>
+          </StackPanel>
         </Border>
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
           <Button x:Name="SetupLaterButton" Width="140" Height="38" Margin="0,0,10,0"
-                  Content="나중에 설정" IsEnabled="False"/>
+                  Content="나중에 설정" IsEnabled="False" Visibility="Collapsed"/>
           <Button x:Name="SetupStartButton" Width="190" Height="38" Margin="0,0,10,0"
-                  Content="공식 설정 시작" IsEnabled="False" IsDefault="True"
-                  AutomationProperties.Name="Hermes 공식 설정 시작"/>
+                  Content="Codex OAuth 로그인" IsEnabled="False" IsDefault="True"
+                  AutomationProperties.Name="OpenAI Codex OAuth 로그인"/>
           <Button x:Name="SetupLabButton" Width="160" Height="38" Margin="0,0,10,0"
-                  Content="연구실 연결 계속" IsEnabled="False"
+                  Content="다음: 에이전트 설정" IsEnabled="False"
                   AutomationProperties.Name="연구실 Mattermost 연결 계속"/>
           <Button x:Name="SetupFinishButton" Width="140" Height="38"
                   Content="마법사 닫기" IsEnabled="False"/>
@@ -160,7 +186,7 @@
         <StackPanel>
           <TextBlock Text="연구실 Mattermost에 새 Hermes 에이전트를 연결합니다." FontSize="20" FontWeight="SemiBold"/>
           <TextBlock Margin="0,8,0,0" TextWrapping="Wrap"
-                     Text="provider/model 설정을 복제한 새 프로필을 만들고, Mattermost·NetBird Dashboard·자동 시작 Gateway·Bot Control 등록을 한 번에 구성합니다."/>
+                     Text="독립 프로필을 만들고 선택한 Codex 모델, Mattermost, NetBird Dashboard, 부팅 Gateway, Bot Control, 매주 업데이트를 한 번에 구성합니다."/>
         </StackPanel>
 
         <ScrollViewer Grid.Row="1" Margin="0,16,0,0" VerticalScrollBarVisibility="Auto">
@@ -206,7 +232,7 @@
                     <TextBlock Text="Bot token"/>
                     <PasswordBox x:Name="LabBotToken" Margin="0,5,0,0" Height="32"/>
                   </StackPanel>
-                  <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,12,0,0">
+                  <StackPanel Grid.Row="1" Grid.Column="0" Margin="0,12,0,0" Visibility="Collapsed">
                     <TextBlock Text="Allowed user IDs (comma-separated)"/>
                     <TextBox x:Name="LabAllowedUserIDs" Margin="0,5,0,0" Height="32"/>
                   </StackPanel>
@@ -214,17 +240,21 @@
                     <TextBlock Text="Home channel ID"/>
                     <TextBox x:Name="LabHomeChannelID" Margin="0,5,0,0" Height="32"/>
                   </StackPanel>
-                  <StackPanel Grid.Row="2" Grid.Column="0" Margin="0,12,0,0">
+                  <StackPanel Grid.Row="2" Grid.Column="0" Margin="0,12,0,0" Visibility="Collapsed">
                     <TextBlock Text="응답 조건"/>
                     <CheckBox x:Name="LabRequireMention" Margin="0,9,0,0" IsChecked="True" Content="멘션된 경우만 응답"/>
                   </StackPanel>
-                  <StackPanel Grid.Row="2" Grid.Column="2" Margin="0,12,0,0">
+                  <StackPanel Grid.Row="2" Grid.Column="2" Margin="0,12,0,0" Visibility="Collapsed">
                     <TextBlock Text="답변 위치"/>
                     <ComboBox x:Name="LabReplyMode" Margin="0,5,0,0" Height="32" SelectedIndex="0">
                       <ComboBoxItem Tag="off" Content="대화 위치 유지"/>
                       <ComboBoxItem Tag="thread" Content="항상 스레드"/>
                     </ComboBox>
                   </StackPanel>
+                  <Border Grid.Row="2" Grid.ColumnSpan="3" Margin="0,12,0,0" Padding="10" CornerRadius="4"
+                          Background="{DynamicResource {x:Static SystemColors.ControlBrushKey}}">
+                    <TextBlock TextWrapping="Wrap" Text="고정 정책: 연구실 사용자 전체 허용 · 채널에서는 @멘션에만 응답 · DM은 멘션 없이 응답 · 일반 메시지는 일반 대화로, 기존 스레드 요청은 해당 스레드로 응답"/>
+                  </Border>
                 </Grid>
               </StackPanel>
             </Border>
@@ -235,7 +265,7 @@
                 <TextBlock Text="Hermes Dashboard와 자동 시작" FontWeight="SemiBold" FontSize="16"/>
                 <TextBlock Margin="0,5,0,0" FontSize="12" TextWrapping="Wrap"
                            Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
-                           Text="Dashboard는 NetBird IP에 바인딩하고 로그인 시 숨김 Scheduled Task로 시작합니다. Bot Control이 이 연결을 자동 등록해 이후 설정 적용에 사용합니다."/>
+                           Text="Dashboard와 Gateway는 현재 사용자 권한의 숨김 작업으로 Windows 부팅 시 시작합니다. 매주 일요일 04:00에 업데이트하고 성공한 경우에만 Gateway를 재시작합니다."/>
                 <Grid Margin="0,12,0,0">
                   <Grid.ColumnDefinitions><ColumnDefinition Width="1.3*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="0.5*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="0.8*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                   <StackPanel Grid.Column="0">

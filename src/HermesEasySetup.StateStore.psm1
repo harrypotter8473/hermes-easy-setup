@@ -131,6 +131,31 @@ function Test-HermesStateCanResume {
     } catch { return $false }
 }
 
+function Test-HermesStateMatchesResumeEnvelope {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]$State,
+        [Parameter(Mandatory = $true)]$Plan
+    )
+
+    if ($null -eq $State) { return $false }
+    try {
+        if ([int]$State.schema_version -ne 2 -or @('Running', 'Failed') -notcontains [string]$State.status) { return $false }
+        if (-not [string]::Equals([string]$State.plan_fingerprint, [string]$Plan.Fingerprint, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        if (-not [string]::Equals([string]$State.source_commit, [string]$Plan.SourceCommit, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        foreach ($pair in @(
+            @([string]$State.hermes_home, [string]$Plan.HermesHome),
+            @([string]$State.install_dir, [string]$Plan.InstallDir),
+            @([string]$State.runtime_root, [string]$Plan.RuntimeRoot)
+        )) {
+            if (-not [string]::Equals([System.IO.Path]::GetFullPath($pair[0]), [System.IO.Path]::GetFullPath($pair[1]), [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Reset-HermesStateForSafeResume {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$State)
@@ -256,6 +281,7 @@ function Exit-HermesInstallLock {
 Export-ModuleMember -Function @(
     'Read-HermesInstallState', 'Save-HermesInstallState', 'New-HermesInstallState',
     'Get-HermesStageRecord', 'Set-HermesStageRecord', 'Test-HermesStateCanResume',
+    'Test-HermesStateMatchesResumeEnvelope',
     'Reset-HermesStateForSafeResume', 'Resolve-HermesInstallWorkerOutcome',
     'Enter-HermesInstallLock', 'Exit-HermesInstallLock'
 )

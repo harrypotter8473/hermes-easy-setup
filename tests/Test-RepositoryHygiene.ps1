@@ -8,6 +8,7 @@ $errors = New-Object System.Collections.Generic.List[string]
 
 $expectedModules = @(
     'HermesEasySetup.Bundle.psm1',
+    'HermesEasySetup.Codex.psm1',
     'HermesEasySetup.Core.psm1',
     'HermesEasySetup.Execution.psm1',
     'HermesEasySetup.InstallEngine.psm1',

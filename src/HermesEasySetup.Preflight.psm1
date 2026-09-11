@@ -459,7 +459,7 @@ function New-HermesInstallPlan {
     $fingerprint = ConvertTo-HermesSha256 -Text $material.ToString()
 
     $setupDetail = switch ($SetupMode) {
-        'Portal' { 'hermes setup --portal 열기' }
+        'Portal' { '마법사에서 OpenAI Codex OAuth와 모델 선택' }
         'Full' { 'hermes setup 열기' }
         default { '나중에 사용자가 직접 설정' }
     }
@@ -468,7 +468,7 @@ function New-HermesInstallPlan {
     $actions.Add([pscustomobject]@{ Order = 2; Name = '소스 검증'; Detail = "공식 설치기와 manifest 계약 SHA-256 확인 ($releaseTag)"; Mutates = $true })
     $actions.Add([pscustomobject]@{ Order = 3; Name = '공식 단계 실행'; Detail = "stage protocol v${protocolVersion}을 통해 의존성 및 Hermes 설치"; Mutates = $true })
     $actions.Add([pscustomobject]@{ Order = 4; Name = '검증'; Detail = '대상 내부 hermes --version 및 hermes doctor 실행'; Mutates = $false })
-    $actions.Add([pscustomobject]@{ Order = 5; Name = '공급자 설정'; Detail = $setupDetail; Mutates = ($SetupMode -ne 'Later') })
+    $actions.Add([pscustomobject]@{ Order = 5; Name = '설치 후 설정'; Detail = $setupDetail; Mutates = ($SetupMode -ne 'Later') })
 
     return [pscustomobject]@{
         SchemaVersion             = 1
@@ -495,5 +495,46 @@ function New-HermesInstallPlan {
     }
 }
 
+function Find-HermesInstallPlanOptionsByFingerprint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Fingerprint,
+        [string]$HermesHome,
+        [string]$InstallDir,
+        [string]$RuntimeRoot,
+        [string]$SourceConfigPath,
+        [string]$ManifestContractPath
+    )
+
+    if ($Fingerprint -cnotmatch '^[0-9A-F]{64}$') { return $null }
+    foreach ($setupMode in @('Portal', 'Full', 'Later')) {
+        foreach ($includeDesktop in @($false, $true)) {
+            foreach ($skipComputerUse in @($false, $true)) {
+                $arguments = @{
+                    HermesHome = $HermesHome
+                    InstallDir = $InstallDir
+                    RuntimeRoot = $RuntimeRoot
+                    IncludeDesktop = $includeDesktop
+                    SkipComputerUse = $skipComputerUse
+                    SetupMode = $setupMode
+                }
+                if (-not [string]::IsNullOrWhiteSpace($SourceConfigPath)) { $arguments.SourceConfigPath = $SourceConfigPath }
+                if (-not [string]::IsNullOrWhiteSpace($ManifestContractPath)) { $arguments.ManifestContractPath = $ManifestContractPath }
+                $plan = New-HermesInstallPlan @arguments
+                if ([string]$plan.Fingerprint -ceq $Fingerprint) {
+                    return [pscustomobject]@{
+                        IncludeDesktop = [bool]$includeDesktop
+                        SkipComputerUse = [bool]$skipComputerUse
+                        SetupMode = [string]$setupMode
+                        Fingerprint = [string]$plan.Fingerprint
+                    }
+                }
+            }
+        }
+    }
+    return $null
+}
+
 Export-ModuleMember -Function 'Get-HermesCommandPath', 'Get-HermesPreflight',
-    'Test-HermesCompletedInstallForSetup', 'New-HermesInstallPlan'
+    'Test-HermesCompletedInstallForSetup', 'New-HermesInstallPlan',
+    'Find-HermesInstallPlanOptionsByFingerprint'

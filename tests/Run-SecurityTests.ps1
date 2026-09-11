@@ -118,6 +118,21 @@ try {
     $trustedPowerShell = Get-HermesPowerShellExecutable
     $expectedPowerShell = [System.IO.Path]::GetFullPath((Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\WindowsPowerShell\v1.0\powershell.exe'))
     Assert-SecurityTrue ($trustedPowerShell.Equals($expectedPowerShell, [StringComparison]::OrdinalIgnoreCase)) 'only exact signed System32 PowerShell selected'
+    $restrictedModulePath = Join-Path $testRoot 'nonexistent-module-path'
+    $moduleProbePath = Join-Path $testRoot 'restricted-module-path-probe.ps1'
+    $loaderPathForProbe = (Join-Path $projectRoot 'src\HermesEasySetup.Loader.psm1').Replace("'", "''")
+    $expectedPowerShellForProbe = $expectedPowerShell.Replace("'", "''")
+    $moduleProbeText = @"
+`$ErrorActionPreference = 'Stop'
+Import-Module '$loaderPathForProbe' -Force
+`$resolved = Get-HermesPowerShellExecutable
+if (-not `$resolved.Equals('$expectedPowerShellForProbe', [StringComparison]::OrdinalIgnoreCase)) { exit 1 }
+"@
+    [System.IO.File]::WriteAllText($moduleProbePath, $moduleProbeText, $encoding)
+    $moduleProbe = Invoke-HermesProcess -FilePath $trustedPowerShell `
+        -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $moduleProbePath) `
+        -Environment @{ PSModulePath = $restrictedModulePath } -TimeoutSeconds 30
+    Assert-SecurityTrue ($moduleProbe.ExitCode -eq 0) 'trusted Authenticode module loads with a restricted inherited PSModulePath'
     $timeoutResult = Invoke-HermesProcess -FilePath $trustedPowerShell -ArgumentList @('-NoLogo','-NoProfile','-Command','Start-Sleep -Seconds 10') -TimeoutSeconds 1
     Assert-SecurityTrue ($timeoutResult.TimedOut -and $timeoutResult.ExitCode -eq -1) 'hung process tree is bounded by timeout'
 

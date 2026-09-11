@@ -47,6 +47,25 @@ function Assert-HermesExecutionPathIsNotReparsePoint {
     }
 }
 
+function Get-HermesAuthenticodeSignature {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $windowsDirectory = Get-HermesExecutionWindowsDirectory
+    $moduleManifest = [System.IO.Path]::GetFullPath((Join-Path $windowsDirectory 'System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'))
+    if (-not (Test-Path -LiteralPath $moduleManifest -PathType Leaf)) {
+        throw "The trusted Microsoft.PowerShell.Security module was not found: $moduleManifest"
+    }
+    Assert-HermesExecutionPathIsNotReparsePoint -LiteralPath $moduleManifest -StopAt $windowsDirectory
+
+    Import-Module -Name $moduleManifest -Force -Global -ErrorAction Stop
+    $command = Get-Command -Name 'Microsoft.PowerShell.Security\Get-AuthenticodeSignature' -CommandType Cmdlet -ErrorAction Stop
+    if ([string]$command.Source -cne 'Microsoft.PowerShell.Security') {
+        throw 'The trusted Get-AuthenticodeSignature command could not be resolved.'
+    }
+    return & $command -LiteralPath $LiteralPath -ErrorAction Stop
+}
+
 function Get-HermesExecutionSystemExecutable {
     param(
         [Parameter(Mandatory = $true)][string]$RelativePath,
@@ -68,7 +87,7 @@ function Get-HermesExecutionSystemExecutable {
     }
 
     if ($RequireMicrosoftSignature) {
-        $signature = Get-AuthenticodeSignature -FilePath $expectedPath -ErrorAction Stop
+        $signature = Get-HermesAuthenticodeSignature -LiteralPath $expectedPath
         if ([string]$signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) {
             throw "$DisplayName does not have a valid Authenticode signature."
         }
@@ -239,7 +258,8 @@ function Invoke-HermesProcess {
         [string]$WorkingDirectory,
         [hashtable]$Environment = @{},
         [int]$TimeoutSeconds = 0,
-        [switch]$Visible
+        [switch]$Visible,
+        [AllowNull()][scriptblock]$OutputLineCallback
     )
 
     $info = New-Object System.Diagnostics.ProcessStartInfo
@@ -306,25 +326,86 @@ function Invoke-HermesProcess {
             }
         }
 
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
         $timedOut = $false
-
-        if ($TimeoutSeconds -gt 0) {
-            $requestedMilliseconds = [int64]$TimeoutSeconds * 1000
-            $waitMilliseconds = $(if ($requestedMilliseconds -gt [int]::MaxValue) { [int]::MaxValue } else { [int]$requestedMilliseconds })
-            if (-not $process.WaitForExit($waitMilliseconds)) {
-                $timedOut = $true
-                Stop-HermesExecutionProcessTree -Process $process
+        if ($null -eq $OutputLineCallback) {
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+            if ($TimeoutSeconds -gt 0) {
+                $requestedMilliseconds = [int64]$TimeoutSeconds * 1000
+                $waitMilliseconds = $(if ($requestedMilliseconds -gt [int]::MaxValue) { [int]::MaxValue } else { [int]$requestedMilliseconds })
+                if (-not $process.WaitForExit($waitMilliseconds)) {
+                    $timedOut = $true
+                    Stop-HermesExecutionProcessTree -Process $process
+                } else {
+                    $process.WaitForExit()
+                }
             } else {
                 $process.WaitForExit()
             }
+            $stdout = Get-HermesExecutionTaskText -Task $stdoutTask -StreamName 'StdOut'
+            $stderr = Get-HermesExecutionTaskText -Task $stderrTask -StreamName 'StdErr'
         } else {
-            $process.WaitForExit()
+            $stdoutBuilder = New-Object System.Text.StringBuilder
+            $stderrBuilder = New-Object System.Text.StringBuilder
+            $stdoutClosed = $false
+            $stderrClosed = $false
+            $stdoutTask = $process.StandardOutput.ReadLineAsync()
+            $stderrTask = $process.StandardError.ReadLineAsync()
+            $deadline = $(if ($TimeoutSeconds -gt 0) { [DateTime]::UtcNow.AddSeconds($TimeoutSeconds) } else { [DateTime]::MaxValue })
+            $exitedAt = $null
+            while ($true) {
+                if (-not $stdoutClosed -and $stdoutTask.IsCompleted) {
+                    $line = $stdoutTask.GetAwaiter().GetResult()
+                    if ($null -eq $line) {
+                        $stdoutClosed = $true
+                    } else {
+                        if ($stdoutBuilder.Length -lt $script:HermesExecutionMaximumStreamBytes) {
+                            $remaining = $script:HermesExecutionMaximumStreamBytes - $stdoutBuilder.Length
+                            $bounded = $(if ($line.Length -gt $remaining) { $line.Substring(0, $remaining) } else { $line })
+                            [void]$stdoutBuilder.AppendLine($bounded)
+                        }
+                        try {
+                            & $OutputLineCallback 'StdOut' $line
+                        } catch {
+                            Stop-HermesExecutionProcessTree -Process $process
+                            throw
+                        }
+                        $stdoutTask = $process.StandardOutput.ReadLineAsync()
+                    }
+                }
+                if (-not $stderrClosed -and $stderrTask.IsCompleted) {
+                    $line = $stderrTask.GetAwaiter().GetResult()
+                    if ($null -eq $line) {
+                        $stderrClosed = $true
+                    } else {
+                        if ($stderrBuilder.Length -lt $script:HermesExecutionMaximumStreamBytes) {
+                            $remaining = $script:HermesExecutionMaximumStreamBytes - $stderrBuilder.Length
+                            $bounded = $(if ($line.Length -gt $remaining) { $line.Substring(0, $remaining) } else { $line })
+                            [void]$stderrBuilder.AppendLine($bounded)
+                        }
+                        try {
+                            & $OutputLineCallback 'StdErr' $line
+                        } catch {
+                            Stop-HermesExecutionProcessTree -Process $process
+                            throw
+                        }
+                        $stderrTask = $process.StandardError.ReadLineAsync()
+                    }
+                }
+                if ($process.HasExited) {
+                    if ($null -eq $exitedAt) { $exitedAt = [DateTime]::UtcNow }
+                    if (($stdoutClosed -and $stderrClosed) -or [DateTime]::UtcNow -ge $exitedAt.AddMilliseconds($script:HermesExecutionStreamWaitMilliseconds)) { break }
+                } elseif (-not $timedOut -and [DateTime]::UtcNow -ge $deadline) {
+                    $timedOut = $true
+                    Stop-HermesExecutionProcessTree -Process $process
+                    $exitedAt = [DateTime]::UtcNow
+                }
+                Start-Sleep -Milliseconds 25
+            }
+            if (-not $process.HasExited) { [void]$process.WaitForExit($script:HermesExecutionExitWaitMilliseconds) }
+            $stdout = $stdoutBuilder.ToString()
+            $stderr = $stderrBuilder.ToString()
         }
-
-        $stdout = Get-HermesExecutionTaskText -Task $stdoutTask -StreamName 'StdOut'
-        $stderr = Get-HermesExecutionTaskText -Task $stderrTask -StreamName 'StdErr'
         $exitCode = $(if ($timedOut) { -1 } else { $process.ExitCode })
         $elapsed = [int64]$watch.ElapsedMilliseconds
         $duration = $(if ($elapsed -gt [int]::MaxValue) { [int]::MaxValue } else { [int]$elapsed })
@@ -418,6 +499,7 @@ function Write-HermesCapturedOutput {
 
 Export-ModuleMember -Function @(
     'ConvertTo-WindowsProcessArgument',
+    'Get-HermesAuthenticodeSignature',
     'Get-HermesPowerShellExecutable',
     'Get-HermesCuratedProcessEnvironment',
     'Invoke-HermesProcess',
