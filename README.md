@@ -4,6 +4,12 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 
 이 프로젝트는 Nous Research의 공식 제품이 아닌 비공식 커뮤니티 도구입니다. Hermes 자체의 사용법과 지원 범위는 [공식 문서](https://hermes-agent.nousresearch.com/docs/)를 기준으로 합니다.
 
+## 설치 설명서
+
+처음 설치한다면 [단계별 설치 설명서](docs/installation-guide.ko.md)를 먼저 읽어 주세요. 준비물, 화면별 입력 예시, Codex 인증, Mattermost 연결, 완료 테스트와 오류 해결 방법을 정리했습니다.
+
+공개용 설명서에는 실제 내부 주소나 인증값을 넣지 않았습니다. 서버 주소·봇 토큰·홈 채널 ID는 관리자에게 별도로 받고, NetBird IPv4에는 설치하는 PC의 주소를 사용하세요.
+
 ## 현재 상태
 
 - 버전 `0.3.0` Windows 네이티브 연구실 통합 MVP
