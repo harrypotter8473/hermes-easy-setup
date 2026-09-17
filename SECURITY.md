@@ -71,6 +71,12 @@ path snapshot 뒤 후속 stage 또는 최종 Verify가 실패하면 PATH/HERMES_
 
 ## 사용자 데이터
 
+### Dashboard 공통 초기값
+
+연구실용 마법사는 빠른 연결을 위해 Dashboard 사용자 이름 `admin`과 비밀번호 `12345678`을 미리 채웁니다. 이는 공개되어 누구나 추측할 수 있는 초기값이며, 비밀이나 충분한 접근 보호 수단으로 간주하지 않습니다. 입력칸은 수정 가능하므로 연결 전에 고유한 비밀번호로 바꾸거나, NetBird 정책에서 신뢰하는 사용자와 Mattermost 서버만 Dashboard에 접근하도록 제한해야 합니다.
+
+초기값 추가만으로 실행 중인 Dashboard의 비밀번호를 바꾸지는 않습니다. 사용자가 연구실 연결을 실행하면 현재 화면의 인증값을 Hermes와 Bot Control에 적용하므로, 기존 프로필을 재설정할 때에도 의도한 인증값인지 확인해야 합니다.
+
 마법사는 `.env`, `config.yaml`, 인증 데이터, skills, sessions, memories, messages와 그 밖의 Hermes 사용자 콘텐츠를 직접 수집하거나 삭제하지 않습니다. 제거 기능이 없는 것도 같은 이유입니다.
 
 v0.2.0의 4단계는 검증된 설치 뒤 Portal/Full을 선택한 사용자가 명시적으로 시작한 공식 Hermes setup을 별도의 보이는 콘솔에서 실행합니다. 사용자의 키보드 입력과 provider 자격증명, setup의 stdin/stdout/stderr는 그 공식 창에만 남고 install worker transport, 마법사 로그와 진단 ZIP에는 수집하지 않습니다. 마법사는 setup 프로세스의 시작과 종료만 추적하며, 그 상태를 검증된 CLI 설치 상태와 합치지 않습니다.

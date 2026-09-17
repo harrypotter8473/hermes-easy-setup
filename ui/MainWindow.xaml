@@ -285,9 +285,12 @@
                   </StackPanel>
                   <StackPanel Grid.Column="6">
                     <TextBlock Text="Password"/>
-                    <PasswordBox x:Name="LabDashboardPassword" Margin="0,5,0,0" Height="32"/>
+                    <PasswordBox x:Name="LabDashboardPassword" Margin="0,5,0,0" Height="32" Password="12345678"/>
                   </StackPanel>
                 </Grid>
+                <TextBlock x:Name="LabDashboardDefaultsNote" Margin="0,8,0,0" FontSize="12" TextWrapping="Wrap"
+                           Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
+                           Text="초기값: admin / 12345678 — 입력 없이 연결할 수 있고 위 입력칸에서 변경할 수 있습니다. 쉽게 추측할 수 있는 공통 비밀번호이므로 신뢰하는 NetBird 사용자에게만 접근을 허용하거나 비밀번호를 변경하세요."/>
               </StackPanel>
             </Border>
 

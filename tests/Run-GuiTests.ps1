@@ -14,6 +14,7 @@ $xamlText = [System.IO.File]::ReadAllText($xamlPath, [System.Text.Encoding]::UTF
 $xml = [xml]$xamlText
 $reader = New-Object System.Xml.XmlNodeReader $xml
 $window = $null
+$ui = @{}
 try {
     $window = [Windows.Markup.XamlReader]::Load($reader)
     foreach ($name in @(
@@ -26,10 +27,11 @@ try {
         'LabPanel', 'LabProfileName', 'LabFullName', 'LabRole', 'LabReuseProfile',
         'LabMattermostURL', 'LabBotToken', 'LabAllowedUserIDs', 'LabHomeChannelID',
         'LabRequireMention', 'LabReplyMode', 'LabNetBirdIP', 'LabDetectNetBirdButton',
-        'LabDashboardPort', 'LabDashboardUsername', 'LabDashboardPassword',
+        'LabDashboardPort', 'LabDashboardUsername', 'LabDashboardPassword', 'LabDashboardDefaultsNote',
         'LabProgress', 'LabStatus', 'LabBackButton', 'LabCloseButton', 'LabApplyButton'
     )) {
         if ($null -eq $window.FindName($name)) { throw "XAML control not found: $name" }
+        $ui[$name] = $window.FindName($name)
     }
     $approval = $window.FindName('ApprovalCheck')
     $installButton = $window.FindName('InstallButton')
@@ -75,6 +77,57 @@ try {
         throw 'Setup start action must have an accessible name.'
     }
     Write-Host 'PASS WPF XAML load, five-step controls, accessibility, and default-deny actions' -ForegroundColor Green
+
+    $dashboardUsername = $ui.LabDashboardUsername
+    $dashboardPassword = $ui.LabDashboardPassword
+    if ($dashboardUsername.Text -cne 'admin' -or $dashboardPassword.Password -cne '12345678') {
+        throw 'Dashboard initial credentials must be prefilled.'
+    }
+    if ($dashboardPassword -isnot [Windows.Controls.PasswordBox] -or [int]$dashboardPassword.PasswordChar -eq 0) {
+        throw 'Dashboard password must remain in a masked PasswordBox.'
+    }
+    if ($dashboardUsername.IsReadOnly -or -not $dashboardUsername.IsEnabled -or -not $dashboardPassword.IsEnabled) {
+        throw 'Dashboard initial credentials must remain editable.'
+    }
+    if (-not $ui.LabDashboardDefaultsNote.Text.Contains('공통 비밀번호')) { throw 'Shared default password warning is required.' }
+    Write-Host 'PASS Dashboard initial credentials are prefilled, masked, editable, and explained' -ForegroundColor Green
+
+    # Load only the pure input builder, never the real GUI event loop or workers.
+    Import-Module (Join-Path $projectRoot 'src\HermesEasySetup.Lab.psm1') -Force -DisableNameChecking
+    $guiTokens = $null
+    $guiParseErrors = $null
+    $guiAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $projectRoot 'HermesEasySetup.Gui.ps1'), [ref]$guiTokens, [ref]$guiParseErrors)
+    if ($guiParseErrors.Count -gt 0) { throw 'GUI input builder source has parse errors.' }
+    $inputFunction = $guiAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'New-LabInputFromUI' }, $true)
+    if ($null -eq $inputFunction) { throw 'GUI input builder was not found.' }
+    . ([scriptblock]::Create($inputFunction.Extent.Text))
+    $ui.LabFullName.Text = 'Fixture Agent'
+    $ui.LabMattermostURL.Text = 'http://mattermost.example.invalid:8065'
+    $ui.LabBotToken.Password = 'fixture-bot-value'
+    $ui.LabNetBirdIP.Text = '100.64.10.20'
+    [void]$ui.SetupModelCombo.Items.Add('fixture-model')
+    $ui.SetupModelCombo.SelectedIndex = 0
+    $script:setupAuthenticated = $true
+    $defaultInput = New-LabInputFromUI
+    if ($defaultInput.DashboardUsername -cne 'admin' -or $defaultInput.DashboardPassword -cne '12345678') {
+        throw 'Connection input must carry the prefilled Dashboard credentials.'
+    }
+    Write-Host 'PASS Default Dashboard credentials reach the connection input without user edits' -ForegroundColor Green
+
+    $dashboardUsername.Text = 'fixture-operator'
+    $dashboardPassword.Password = 'fixture-custom-password'
+    $ui.LabReuseProfile.IsChecked = $true
+    $customInput = New-LabInputFromUI
+    if ($customInput.DashboardUsername -cne 'fixture-operator' -or $customInput.DashboardPassword -cne 'fixture-custom-password' -or -not $customInput.ReuseExistingProfile) {
+        throw 'Custom Dashboard credentials must survive an existing-profile retry.'
+    }
+    Write-Host 'PASS Custom Dashboard credentials are preserved for existing-profile retries' -ForegroundColor Green
+
+    $dashboardPassword.Clear()
+    $emptyPasswordRejected = $false
+    try { [void](New-LabInputFromUI) } catch { $emptyPasswordRejected = $_.Exception.Message.Contains('Dashboard password') }
+    if (-not $emptyPasswordRejected) { throw 'Clearing the password must not silently restore the shared default.' }
+    Write-Host 'PASS Empty Dashboard password still requires explicit correction' -ForegroundColor Green
 } finally {
     if ($null -ne $window) { $window.Close() }
     $reader.Close()

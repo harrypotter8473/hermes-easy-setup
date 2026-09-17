@@ -8,7 +8,7 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 
 처음 설치한다면 [단계별 설치 설명서](docs/installation-guide.ko.md)를 먼저 읽어 주세요. 준비물, 화면별 입력 예시, Codex 인증, Mattermost 연결, 완료 테스트와 오류 해결 방법을 정리했습니다.
 
-공개용 설명서에는 실제 내부 주소나 인증값을 넣지 않았습니다. 서버 주소·봇 토큰·홈 채널 ID는 관리자에게 별도로 받고, NetBird IPv4에는 설치하는 PC의 주소를 사용하세요.
+공개용 설명서에는 실제 내부 주소나 개인 인증값을 넣지 않았습니다. 서버 주소·봇 토큰·홈 채널 ID는 관리자에게 별도로 받고, NetBird IPv4에는 설치하는 PC의 주소를 사용하세요. Dashboard의 공개 초기값은 아래와 같이 안내합니다.
 
 ## 현재 상태
 
@@ -36,7 +36,7 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 - Windows 10/11 x64와 Program Files에 설치한 [Git for Windows](https://gitforwindows.org/)
 - 연구실 NetBird 연결 및 Mattermost 서버 접근
 - 사용할 ChatGPT/Codex 계정, 해당 봇의 Mattermost 토큰과 홈 채널 ID
-- Dashboard에서 사용할 사용자 이름과 비밀번호
+- Dashboard 초기값은 사용자 이름 `admin`, 비밀번호 `12345678`이며 미리 입력되어 있습니다. 필요하면 연결 전에 변경할 수 있습니다.
 
 1. 이 저장소의 GitHub Release 또는 소스 저장소에서만 파일을 받습니다.
 2. Release가 제공되면 함께 게시되는 `SHA256SUMS`와 다운로드 파일을 대조합니다.
@@ -46,7 +46,7 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 6. 동의 체크박스를 직접 선택한 뒤 설치를 시작합니다.
 7. 4단계에서 OpenAI Codex 인증 상태를 확인합니다. 로그인이 필요하면 버튼을 누르고 열린 브라우저에서 OAuth만 승인합니다.
 8. 설치된 Hermes가 제공하는 Codex 모델 목록에서 기본 모델을 선택합니다. 기본 선택은 `gpt-5.6-terra`입니다.
-9. 5단계에서 프로필 이름·Full name·역할, Mattermost URL·봇 토큰·홈 채널, NetBird IP와 Dashboard 인증값을 입력합니다.
+9. 5단계에서 프로필 이름·Full name·역할, Mattermost URL·봇 토큰·홈 채널과 NetBird IP를 입력합니다. Dashboard는 미리 입력된 `admin` / `12345678`로 연결하거나 원하는 값으로 바꿀 수 있습니다.
 10. UAC를 승인하면 Gateway와 Dashboard가 숨김 S4U 작업으로 Windows 부팅 시 시작되고, 매주 일요일 04:00 업데이트 작업이 등록됩니다.
 11. v0.1.1 화면에서 설치 검증 로그는 성공했지만 마지막에 실패로 표시된 PC라면 `PC 확인`을 다시 실행하세요. 완료 기록·official origin·pin·경로가 모두 맞으면 `기존 설치 설정 계속`이 나타납니다.
 
@@ -78,6 +78,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\HermesEasySetup.ps1 `
 - GUI에서 worker로 넘기는 봇 토큰과 Dashboard 비밀번호는 Windows DPAPI CurrentUser로 암호화한 임시 파일을 사용하며 작업 종료 시 삭제합니다.
 - Bot Control 0.6.0 이상이 설치되어 있어야 자동 등록이 성공합니다. Mattermost 서버에서 해당 NetBird Dashboard URL에 접근할 수 없으면 등록 단계에서 중단합니다.
 - Dashboard 시작은 최대 240초 기다린 다음 로그인과 실제 인증 세션까지 검증합니다. 시작 지연과 로그인 실패는 별도로 표시합니다.
+- Dashboard 초기값 `admin` / `12345678`은 누구나 알 수 있는 공통 계정이므로 신뢰하는 NetBird 사용자에게만 접근을 허용하거나 연결 전에 비밀번호를 변경하세요. 기존 Dashboard 비밀번호가 자동으로 바뀌지는 않지만, 마법사에서 연구실 연결을 실행하면 현재 입력값이 적용됩니다. 기존 프로필 재설정 시에도 사용할 인증값을 확인하세요.
 - 재시도 시 이 프로필의 관리 대상 Gateway·Dashboard 예약 작업만 재시작합니다. 실패한 뒤 같은 창에서 입력값을 유지하고 기존 프로필로 다시 시도할 수 있습니다.
 
 다른 컴퓨터에서의 설치 및 Bot Control 자동 등록 전체 흐름은 실제 테스트가 필요합니다. 단위·GUI 테스트 통과만으로 모든 PC의 연결 성공을 보장하지는 않습니다.
