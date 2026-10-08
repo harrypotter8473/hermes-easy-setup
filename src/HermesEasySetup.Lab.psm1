@@ -420,8 +420,6 @@ function Register-HermesWithBotControl {
         [Parameter(Mandatory = $true)][int]$DashboardPort,
         [AllowNull()][string]$HermesVersion
     )
-    $endpoint = $MattermostURL.TrimEnd('/') + '/plugins/com.infonet.bot-control/api/v1/agents/register'
-    $headers = @{ Authorization = 'Bearer ' + $BotToken }
     $payload = [ordered]@{
         dashboard_url = $DashboardURL
         dashboard_username = $DashboardUsername
@@ -432,20 +430,46 @@ function Register-HermesWithBotControl {
         dashboard_port = $DashboardPort
         hermes_version = [string]$HermesVersion
     }
+    return Invoke-HermesLabMattermostAPI -MattermostURL $MattermostURL -Path '/plugins/com.infonet.bot-control/api/v1/agents/register' -Token $BotToken -Method POST -Body $payload
+}
+
+function Invoke-HermesLabMattermostAPI {
+    param([string]$MattermostURL,[string]$Path,[string]$Token,[string]$Method = 'GET',$Body = $null)
+    $base = ConvertTo-HermesMattermostURL $MattermostURL
+    if (-not $Path.StartsWith('/api/v4/') -and -not $Path.StartsWith('/plugins/com.infonet.bot-control/api/v1/')) { throw '허용되지 않은 연결 검사 경로입니다.' }
+    $request = @{ Uri = $base + $Path; Method = $Method; UseBasicParsing = $true; TimeoutSec = 30; MaximumRedirection = 0; ErrorAction = 'Stop'; Headers = @{ Authorization = 'Bearer ' + $Token } }
+    if ($null -ne $Body) { $request.ContentType = 'application/json; charset=utf-8'; $request.Body = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 12 -Compress)) }
     try {
-        return Invoke-RestMethod -Uri $endpoint -Method Post -Headers $headers -ContentType 'application/json' -Body ($payload | ConvertTo-Json -Compress) -TimeoutSec 30
+        $response = Invoke-WebRequest @request
+        if ([int]$response.StatusCode -ge 300) { throw 'Redirect refused' }
+        return ($response.Content | ConvertFrom-Json)
     } catch {
-        $message = $_.Exception.Message
-        if ($null -ne $_.ErrorDetails -and -not [string]::IsNullOrWhiteSpace($_.ErrorDetails.Message)) {
-            try {
-                $serverError = $_.ErrorDetails.Message | ConvertFrom-Json
-                if (-not [string]::IsNullOrWhiteSpace([string]$serverError.message)) { $message = [string]$serverError.message }
-            } catch {
-                $message = $_.Exception.Message
-            }
-        }
-        throw "Bot Control 자동 등록 실패: $(Protect-HermesLogText $message)"
+        $code = 0
+        if ($_.Exception.PSObject.Properties['Response'] -and $null -ne $_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+        $detail = switch ($code) { 401 {'봇 토큰을 확인하세요.'} 403 {'봇 권한·팀·채널 멤버십을 확인하세요.'} 404 {'서버 주소·채널 ID·Bot Control 활성화를 확인하세요.'} 502 {'Mattermost 서버에서 Dashboard에 연결할 수 있는지 주소·인증·방화벽을 확인하세요.'} default {'서버와 NetBird 연결을 확인하세요. 리디렉션 주소는 사용하지 않습니다.'} }
+        $errorObject = New-Object Exception ("Mattermost/Bot Control 요청 실패 (HTTP $code). $detail")
+        $errorObject.Data['HttpStatus'] = $code
+        throw $errorObject
     }
+}
+
+function Test-HermesLabConnection {
+    [CmdletBinding()]
+    param([string]$MattermostURL,[string]$BotToken,[string]$HomeChannelID)
+    $base = ConvertTo-HermesMattermostURL $MattermostURL
+    if ($BotToken -cnotmatch '^[a-z0-9]{26}$') { throw '26자리 Mattermost 봇 토큰을 입력하세요. 토큰 ID나 관리자 비밀번호가 아닙니다.' }
+    if ($HomeChannelID -cnotmatch '^[a-z0-9]{26}$') { throw '26자리 Home Channel ID를 입력하세요. 채널 URL이나 이름이 아닙니다.' }
+    $me = Invoke-HermesLabMattermostAPI $base '/api/v4/users/me' $BotToken
+    if (-not $me.PSObject.Properties['is_bot'] -or -not $me.is_bot -or $me.delete_at -ne 0 -or $me.roles -cne 'system_user' -or $me.id -cnotmatch '^[a-z0-9]{26}$') { throw '활성 일반 봇 계정의 토큰만 사용할 수 있습니다. 사람·관리자 계정 토큰은 사용하지 않습니다.' }
+    $channel = Invoke-HermesLabMattermostAPI $base "/api/v4/channels/$HomeChannelID" $BotToken
+    if ($channel.delete_at -ne 0 -or $channel.type -cnotin @('O','P') -or $channel.team_id -cnotmatch '^[a-z0-9]{26}$') { throw '기본 채널은 활성 팀의 공개/비공개 채널이어야 합니다.' }
+    $member = Invoke-HermesLabMattermostAPI $base "/api/v4/channels/$HomeChannelID/members/$($me.id)" $BotToken
+    if ($member.user_id -cne $me.id) { throw '봇이 지정한 채널의 멤버가 아닙니다.' }
+    $pluginPresent = $false
+    try { $null = Invoke-HermesLabMattermostAPI $base '/plugins/com.infonet.bot-control/api/v1/access' $BotToken }
+    catch { if ($_.Exception.Data['HttpStatus'] -ne 403) { throw }; $pluginPresent = $true }
+    if (-not $pluginPresent) { throw 'Bot Control 관리 API가 일반 봇에게 허용되어 있습니다. 관리자가 플러그인 권한을 확인해야 합니다.' }
+    return [pscustomobject]@{ Ready = $true; ServerURL = $base; BotUserID = $me.id; BotUsername = $me.username; HomeChannelID = $HomeChannelID; ChannelName = $channel.name; TeamID = $channel.team_id; BotControlReachable = $true }
 }
 
 function Invoke-HermesLabSetup {
@@ -488,6 +512,8 @@ function Invoke-HermesLabSetup {
     $verification = Test-HermesInstallation -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir -RuntimeRoot $paths.RuntimeRoot
     if (-not $verification.Verified -or [string]::IsNullOrWhiteSpace([string]$verification.CommandPath)) { throw "검증된 Hermes 설치가 필요합니다: $(@($verification.FailedChecks) -join ', ')" }
     $command = [string]$verification.CommandPath
+    Publish-HermesLabStage -Callback $ProgressCallback -Stage 'connection' -Message '봇 토큰·홈 채널 멤버십·Bot Control 접근을 변경 전에 확인합니다.' -Percent 10
+    $connection = Test-HermesLabConnection -MattermostURL $MattermostURL -BotToken $MattermostToken -HomeChannelID $HomeChannelID
     $environment = New-HermesLabEnvironment -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir
     $profileDir = Join-Path (Join-Path $paths.HermesHome 'profiles') $ProfileName
     $profileAlreadyExisted = Test-Path -LiteralPath $profileDir -PathType Container
@@ -546,6 +572,7 @@ function Invoke-HermesLabSetup {
     $versionLine = @($versionResult.StdOut -split '[\r\n]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
     $versionText = $(if ($versionLine.Count -gt 0) { [string]$versionLine[0] } else { 'Hermes Agent' })
     $registration = Register-HermesWithBotControl -MattermostURL $MattermostURL -BotToken $MattermostToken -DashboardURL $dashboardURL -DashboardUsername $DashboardUsername -DashboardPassword $DashboardPassword -Profile $ProfileName -NetBirdIP $NetBirdIP -DashboardPort $DashboardPort -HermesVersion $versionText
+    if ($registration.bot_user_id -cne $connection.BotUserID) { throw '등록된 봇 ID가 사전 검증한 봇과 다릅니다.' }
     Publish-HermesLabStage -Callback $ProgressCallback -Stage 'gateway' -Message '부팅 시 실행되는 프로필 Gateway 상태를 확인합니다.' -Percent 88
     $gatewayStatus = Invoke-HermesLabCommand -CommandPath $command -Arguments @('-p', $ProfileName, 'gateway', 'status') -Environment $environment -TimeoutSeconds 60
     Publish-HermesLabStage -Callback $ProgressCallback -Stage 'complete' -Message '연구실 Hermes 연결과 검증이 완료되었습니다.' -Percent 100 -State 'succeeded'
@@ -576,6 +603,7 @@ Export-ModuleMember -Function @(
     'Test-HermesLabProfileName',
     'Test-HermesNetBirdIPv4',
     'Get-HermesNetBirdIPv4',
+    'Test-HermesLabConnection',
     'Protect-HermesLabInput',
     'Unprotect-HermesLabInput',
     'Invoke-HermesLabSetup'

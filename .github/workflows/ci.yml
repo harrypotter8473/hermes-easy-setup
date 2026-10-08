@@ -49,9 +49,69 @@ jobs:
         shell: powershell
         run: .\tests\Run-LabDashboardTests.ps1
 
+      - name: Mattermost Desktop registration and installer regression tests
+        shell: powershell
+        run: .\tests\Run-MattermostTests.ps1
+
+      - name: Mattermost Desktop tests on PowerShell 7
+        shell: pwsh
+        run: .\tests\Run-MattermostTests.ps1
+
       - name: Unit tests on PowerShell 7
         shell: pwsh
         run: .\tests\Run-Tests.ps1
+
+      - name: Mattermost admin safety and resume tests
+        shell: powershell
+        run: .\tests\Run-AdminTests.ps1
+
+      - name: Mattermost admin tests on PowerShell 7
+        shell: pwsh
+        run: .\tests\Run-AdminTests.ps1
+
+      - name: Mattermost admin WPF smoke test
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File .\HermesAdminSetup.Gui.ps1 -SmokeTest
+
+      - name: Admin bot issuance and recovery tests (PowerShell 5.1)
+        shell: powershell
+        run: .\tests\Run-AdminBotTests.ps1
+
+      - name: Admin bot issuance and recovery tests (PowerShell 7)
+        shell: pwsh
+        run: .\tests\Run-AdminBotTests.ps1
+
+      - name: NetBird scope recovery and user connection checks (PowerShell 5.1)
+        shell: powershell
+        run: |
+          .\tests\Run-AdminNetworkTests.ps1
+          .\tests\Run-LabConnectionTests.ps1
+
+      - name: NetBird scope recovery and user connection checks (PowerShell 7)
+        shell: pwsh
+        run: |
+          .\tests\Run-AdminNetworkTests.ps1
+          .\tests\Run-LabConnectionTests.ps1
+
+      - name: Separate distributions, checksums, and extracted GUI smoke tests
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Run-DistributionTests.ps1
+
+      - name: Local four-agent research setup tests
+        shell: powershell
+        run: |
+          .\tests\Run-DockerTests.ps1
+          .\tests\Run-DockerCliTests.ps1
+          .\tests\Run-ResearchTests.ps1
+          .\tests\Run-ResearchRuntimeTests.ps1
+          powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File .\HermesResearchSetup.Gui.ps1 -SmokeTest
+
+      - name: Local research tests on PowerShell 7
+        shell: pwsh
+        run: |
+          .\tests\Run-DockerTests.ps1
+          .\tests\Run-ResearchTests.ps1
+          .\tests\Run-ResearchRuntimeTests.ps1
 
   secret-scan:
     runs-on: ubuntu-latest

@@ -41,6 +41,47 @@ try {
     Assert-CliTrue ($guardExit -eq 2 -and [int]$guardError.exit_code -eq 2 -and [string]$guardError.message -like '*-Apply*') 'Install without Apply is default-deny'
     Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) 'Apply guard creates no runtime state'
 
+    $dockerGuard = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action DockerInstall -RuntimeRoot $runtimeRoot -Json)
+    Assert-CliTrue ($LASTEXITCODE -eq 2 -and ($dockerGuard[-1] | ConvertFrom-Json).message -like '*-Apply*') 'Docker download and install require explicit Apply'
+    Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot)) 'Docker consent guard creates no runtime or download cache'
+
+    $mattermostGuard = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action MattermostSetup -RuntimeRoot $runtimeRoot -MattermostServerURL 'https://example.invalid' -Json)
+    Assert-CliTrue ($LASTEXITCODE -eq 2 -and ($mattermostGuard[-1] | ConvertFrom-Json).message -like '*-Apply*') 'Mattermost setup without Apply is default-deny'
+    Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot)) 'Mattermost consent guard creates no runtime state'
+
+    $adminGuard = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action AdminSetup -RuntimeRoot $runtimeRoot -Json)
+    Assert-CliTrue ($LASTEXITCODE -eq 2 -and ($adminGuard[-1] | ConvertFrom-Json).message -like '*-Apply*') 'Admin setup without Apply is default-deny'
+    Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot)) 'Admin consent guard creates no runtime state'
+    $adminMissing = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action AdminSetup -Apply -RuntimeRoot $runtimeRoot -Json)
+    Assert-CliTrue ($LASTEXITCODE -ne 0 -and ($adminMissing[-1] | ConvertFrom-Json).message -like '*암호화*') 'Admin setup requires encrypted input'
+    $adminForeign = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action AdminSetup -Apply -RuntimeRoot $runtimeRoot -AdminInputPath (Join-Path $testRoot 'foreign.bin') -Json)
+    Assert-CliTrue ($LASTEXITCODE -ne 0 -and ($adminForeign[-1] | ConvertFrom-Json).message -like '*transport*') 'Admin setup rejects foreign transport path before reading or deleting it'
+
+    $botGuard = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action AdminBotSetup -RuntimeRoot $runtimeRoot -Json)
+    Assert-CliTrue ($LASTEXITCODE -eq 2 -and ($botGuard[-1] | ConvertFrom-Json).message -like '*-Apply*') 'Admin bot issuance requires explicit Apply'
+    $botMissing = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action AdminBotSetup -Apply -RuntimeRoot $runtimeRoot -Json)
+    Assert-CliTrue ($LASTEXITCODE -ne 0 -and ($botMissing[-1] | ConvertFrom-Json).message -like '*암호화*') 'Admin bot issuance requires encrypted input'
+    $botForeign = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action AdminBotSetup -Apply -RuntimeRoot $runtimeRoot -AdminInputPath (Join-Path $testRoot 'foreign.bin') -Json)
+    Assert-CliTrue ($LASTEXITCODE -ne 0 -and ($botForeign[-1] | ConvertFrom-Json).message -like '*transport*') 'Admin bot issuance rejects foreign input file'
+    Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot)) 'Bot guards do not create state'
+
+    $researchGuard = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action ResearchTeamSetup -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -Json)
+    $researchGuardExit = $LASTEXITCODE
+    $researchGuardError = $researchGuard[-1] | ConvertFrom-Json
+    Assert-CliTrue ($researchGuardExit -eq 2 -and [int]$researchGuardError.exit_code -eq 2 -and [string]$researchGuardError.message -like '*-Apply*') 'Research team setup without Apply is default-deny'
+    Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot)) 'Research consent guard creates no runtime state'
+    $researchMissing = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action ResearchTeamSetup -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -Json)
+    Assert-CliTrue ($LASTEXITCODE -ne 0 -and ($researchMissing[-1] | ConvertFrom-Json).message -like '*암호화*') 'Research team setup requires encrypted input'
+    Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot)) 'Research missing input guard creates no runtime state'
+    if (-not (Test-Path -LiteralPath $testRoot -PathType Container)) { New-Item -ItemType Directory -Path $testRoot | Out-Null }
+    $researchForeignPath = Join-Path $testRoot 'research-foreign.bin'
+    $researchForeignBytes = [byte[]]@(0, 1, 2, 13, 10, 255)
+    [IO.File]::WriteAllBytes($researchForeignPath, $researchForeignBytes)
+    $researchForeign = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action ResearchTeamSetup -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -ResearchInputPath $researchForeignPath -Json)
+    Assert-CliTrue ($LASTEXITCODE -ne 0 -and ($researchForeign[-1] | ConvertFrom-Json).message -like '*transport*') 'Research team setup rejects foreign transport path before decrypting it'
+    Assert-CliTrue ((Test-Path -LiteralPath $researchForeignPath -PathType Leaf) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($researchForeignPath)) -ceq [Convert]::ToBase64String($researchForeignBytes)) 'Research foreign input remains byte-equivalent after rejection'
+    Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot)) 'Research foreign path guard creates no runtime state'
+
     $codexGuardOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action CodexAuth -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -Json)
     $codexGuardExit = $LASTEXITCODE
     $codexGuardError = $codexGuardOutput[-1] | ConvertFrom-Json

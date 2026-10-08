@@ -4,7 +4,7 @@ Hermes Easy Setup은 Hermes 설치 로직을 다시 구현하지 않습니다. �
 
 ```text
 사용자
-  -> 5단계 WPF: PC 확인 -> 계획/승인 -> CLI 설치/검증 -> 공식 설정 -> 연구실 연결
+  -> 6단계 WPF: PC 확인 -> 계획/승인 -> CLI 설치/검증 -> Mattermost Desktop -> Codex 인증/모델 -> 연구실 연결
   -> 기본 거부 승인 + plan fingerprint
   -> 별도 signed System32 PowerShell worker
   -> tag object -> peeled commit -> installer blob 검증
@@ -14,8 +14,9 @@ Hermes Easy Setup은 Hermes 설치 로직을 다시 구현하지 않습니다. �
   -> 원자적 체크포인트
   -> fresh-only launcher 정상화 + no-exec Git/index/launcher 정적 검증
   -> 검증된 설치 상태 확정
-  -> Portal/Full 선택 시 별도 보이는 공식 hermes setup 프로세스(입출력 비수집)
-  -> 설치와 구분된 설정 프로세스 종료 상태
+  -> 별도 승인된 MattermostSetup worker: 공식 MSI 검증 + 기존 config 보존 병합
+  -> Codex OAuth worker와 모델 선택 (일반 hermes setup 미실행)
+  -> DPAPI Lab worker로 새 프로필과 서비스 연결
 ```
 
 ## 단일 모듈 경로
@@ -23,9 +24,17 @@ Hermes Easy Setup은 Hermes 설치 로직을 다시 구현하지 않습니다. �
 | 구성 | 책임 |
 |---|---|
 | `Start-HermesEasySetup.cmd` | System32 Windows PowerShell 5.1 STA 진입점 |
-| `HermesEasySetup.Gui.ps1` | 5단계 WPF, 계획 승인, 격리 install worker, 보이는 공식 setup, DPAPI Lab worker 추적 |
+| `HermesEasySetup.Gui.ps1` | 6단계 WPF, 계획 승인, Install/Mattermost/Codex/DPAPI Lab worker 추적 |
+| `src/HermesEasySetup.Mattermost.psm1` | Desktop 감지, 고정 공식 MSI 검증·설치, 버전별 서버 목록 병합·백업, 서버 ping |
+| `src/HermesEasySetup.Docker.psm1` | 전체/사용자별 Docker 설치 감지, PC 조건·엔진 상태, 승인된 고정 다운로드·서명 검증·설치 후 재확인 |
+| `HermesAdminSetup.Gui.ps1` | 별도 서버·관리자·Bot Control 설정, 봇 생성 동의·결과 복사 |
+| `HermesResearchSetup.Gui.ps1` | 로컬 서버 → Hermes·모델 → 네 에이전트 한 페이지, 역할 편집·기존 배정 복원 |
+| `src/HermesEasySetup.Research.psm1` | 네 역할·예약 프로필 입력 계약, 비밀값 없는 역할 템플릿 저장 |
+| `src/HermesEasySetup.ResearchRuntime.psm1` | 로컬 봇·채널 사전 검사, 네 프로필·SOUL·로그인 Gateway Task, 소유 기반 재설정 |
+| `src/HermesEasySetup.Admin.psm1` | 고정 로컬 Docker, 배포 소유권·관리자 검증, Compose 전환 기록 |
+| `src/HermesEasySetup.AdminBots.ps1` | Admin 모듈 내부 봇 생성·멤버십·토큰 DPAPI 보관·재시도·생성 설정 복구 |
 | `src/HermesEasySetup.Lab.psm1` | 새 프로필 격리, Mattermost 설정, NetBird Dashboard Task, Gateway Task, Bot Control 자동 등록·검증 |
-| `HermesEasySetup.ps1` | `Diagnose/Plan/Install/Verify/Setup/Bundle` CLI와 종료 코드 |
+| `HermesEasySetup.ps1` | 사용자 CLI 및 관리자·`ResearchTeamSetup` 숨김 작업, 종료 코드 |
 | `src/HermesEasySetup.Core.psm1` | 경로, pin 설정, 해시, 오류 코드, 로그 정제 |
 | `src/HermesEasySetup.Preflight.psm1` | target-bound command, preflight, 계획 지문 |
 | `src/HermesEasySetup.StateStore.psm1` | 설치 잠금, 원자적 checkpoint, fail-closed resume |
@@ -34,7 +43,17 @@ Hermes Easy Setup은 Hermes 설치 로직을 다시 구현하지 않습니다. �
 | `src/HermesEasySetup.InstallEngine.psm1` | 공식 stage 조정과 provenance 최종 검증 |
 | `src/HermesEasySetup.Bundle.psm1` | 허용 목록 기반 로컬 진단 ZIP과 경로 정제 |
 
-`Loader.psm1`은 이 순서의 7개 모듈만 import합니다. compat/initial 구현이나 이름 충돌 override는 배포에 포함하지 않습니다.
+`Loader.psm1`은 명시된 모듈 경로만 import합니다. compat/initial 구현이나 이름 충돌 override는 배포에 포함하지 않습니다.
+
+## 개인 연구실 초기 버전
+
+새 진입점은 기존 GUI를 교체하지 않고 관리자 서버·Hermes 설치·Codex 인증 모듈을 재사용합니다. 세 번째 화면에서 네 이름·봇 토큰·역할을 함께 설정합니다. 역할 템플릿과 공개 팀 구성은 RuntimeRoot의 `research` 아래 저장하고 기존 배정을 복원합니다.
+
+첫 화면은 읽기 전용 `DockerStatus`를 조회하고 미설치·미실행·조건 미충족을 구분합니다. 명시적 동의가 있어야 `DockerInstall -Apply` worker에서 고정 공식 설치기를 다운로드·해시·서명 검증 후 실행합니다. 설치 종료 및 재부팅 필요는 Linux 엔진 준비와 별도로 표시합니다. Docker 없는 경로는 안내만 제공하며 다른 환경을 자동 인수하지 않습니다.
+
+Research runtime은 loopback Mattermost의 서로 다른 일반 봇 4개와 채널 접근을 검사하고 기본 프로필을 복제하지 않는 독립 프로필 4개를 만듭니다. SOUL 관리 블록만 수정하며 소유 프로필 재설정 시 기존 메모리·세션을 유지합니다. 토큰은 DPAPI로 전송하지만 실행용 `.env`에는 평문으로 저장됩니다.
+
+Gateway만 현재 사용자의 로그인 예약 작업으로 등록합니다. Dashboard·NetBird·Bot Control 등록·자동 업데이트·자동 협업은 이 흐름에서 구성하지 않습니다. 종료 코드만으로 완료하지 않고 각 Gateway의 PID 긍정 상태와 해당 소유 예약 작업 `Running`을 확인합니다. 실제 모델 답변은 사용자의 Mattermost @멘션 점검이 필요합니다.
 
 ## 승인과 freshness
 
@@ -68,9 +87,9 @@ v0.1.2는 core CLI stage만 실행하고 `-SkipComputerUse`를 강제합니다. 
 
 ## 설치와 공식 설정의 분리
 
-4단계 WPF는 install worker가 종료하고 최종 provenance·CLI 검증이 성공한 뒤 Portal/Full을 선택한 경우에만 사용자의 명시적 버튼 입력으로 공식 `hermes setup --portal` 또는 `hermes setup`을 새 보이는 콘솔에서 시작합니다. setup은 install worker의 stdout/stderr 리디렉션을 재사용하지 않습니다. 키보드 입력, 공급자 자격증명과 setup의 stdin/stdout/stderr는 공식 Hermes 콘솔에만 머물며 마법사 이벤트·로그·진단 번들에 복사하지 않습니다.
+4단계 Mattermost 화면은 명시적 승인 뒤 숨김 CLI worker를 실행합니다. 새 Desktop 설치만 서명된 MSI를 UAC로 실행하며 GUI 자체는 승격하지 않습니다. 현재 사용자 AppData의 config v1~v4를 보존 병합하고, 앱 실행 중 변경·손상/미지원 형식·reparse point를 거부합니다. 5단계는 기존 Codex OAuth와 모델 선택을 사용하며 일반 Hermes setup 메뉴는 열지 않습니다.
 
-5단계 Lab worker는 provider setup과 분리됩니다. GUI는 Mattermost 봇 토큰과 Dashboard 비밀번호가 포함된 JSON을 Windows DPAPI CurrentUser로 암호화한 뒤 RuntimeRoot의 ui-transport 아래 임시 파일로 전달합니다. CLI 인수와 JSON 이벤트에는 비밀값을 넣지 않으며 worker는 파일을 복호화해 사용한 뒤 삭제합니다.
+6단계 Lab worker는 provider setup과 분리됩니다. GUI는 Mattermost 봇 토큰과 Dashboard 비밀번호가 포함된 JSON을 Windows DPAPI CurrentUser로 암호화한 뒤 RuntimeRoot의 ui-transport 아래 임시 파일로 전달합니다. CLI 인수와 JSON 이벤트에는 비밀값을 넣지 않으며 worker는 파일을 복호화해 사용한 뒤 삭제합니다.
 
 Lab worker는 기본 프로필을 clone한 새 프로필에서 메시징 환경 변수만 정리하고 Mattermost 연결과 관리 정체성을 기록합니다. Dashboard는 NetBird IP에 바인딩된 사용자 Scheduled Task로, Gateway는 해당 프로필의 공식 Hermes gateway install 명령으로 자동 시작합니다. 마지막으로 봇 토큰으로 Bot Control 등록 API를 호출하며 Mattermost 플러그인이 호출자의 봇 계정 여부와 Dashboard 로그인·상태를 검증한 뒤 연결 정보를 저장합니다.
 

@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param()
+param([switch]$SmokeTest)
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -15,6 +15,8 @@ $names = @(
     'PlanPanel', 'IncludeDesktopCheck', 'SkipComputerUseCheck', 'SetupModeCombo', 'PlanText', 'ApprovalCheck',
     'BackButton', 'InstallButton', 'WorkPanel', 'WorkTitle', 'WorkStatus', 'InstallProgress', 'WorkLog',
     'BundleButton', 'FinishButton', 'SetupPanel', 'SetupTitle', 'SetupStatus', 'SetupDetails', 'SetupOAuthPanel', 'SetupOAuthCode', 'SetupOpenOAuthButton', 'SetupModelCombo', 'SetupRefreshButton',
+    'MattermostPanel', 'MattermostServerURL', 'MattermostServerName', 'MattermostApproval', 'MattermostApplyButton',
+    'MattermostProgress', 'MattermostStatus', 'MattermostOpenButton', 'MattermostBrowserButton', 'MattermostNextButton', 'MattermostCloseButton',
     'SetupLaterButton', 'SetupStartButton', 'SetupLabButton', 'SetupFinishButton',
     'LabPanel', 'LabProfileName', 'LabFullName', 'LabRole', 'LabReuseProfile',
     'LabMattermostURL', 'LabBotToken', 'LabAllowedUserIDs', 'LabHomeChannelID',
@@ -58,6 +60,12 @@ $script:labInputPath = $null
 $script:labStdoutLines = 0
 $script:labStderrLines = 0
 $script:labResult = $null
+$script:mattermostWorker = $null
+$script:mattermostTimer = $null
+$script:mattermostResult = $null
+$script:mattermostOut = $null
+$script:mattermostErr = $null
+$script:mattermostLines = 0
 
 function Get-SelectedSetupMode {
     return 'Portal'
@@ -79,18 +87,20 @@ function Restore-HermesResumablePlanSelection {
 }
 
 function Show-WizardPanel {
-    param([ValidateSet('Welcome', 'Plan', 'Work', 'Setup', 'Lab')][string]$Name)
+    param([ValidateSet('Welcome', 'Plan', 'Work', 'Mattermost', 'Setup', 'Lab')][string]$Name)
     $ui.WelcomePanel.Visibility = $(if ($Name -eq 'Welcome') { 'Visible' } else { 'Collapsed' })
     $ui.PlanPanel.Visibility = $(if ($Name -eq 'Plan') { 'Visible' } else { 'Collapsed' })
     $ui.WorkPanel.Visibility = $(if ($Name -eq 'Work') { 'Visible' } else { 'Collapsed' })
     $ui.SetupPanel.Visibility = $(if ($Name -eq 'Setup') { 'Visible' } else { 'Collapsed' })
     $ui.LabPanel.Visibility = $(if ($Name -eq 'Lab') { 'Visible' } else { 'Collapsed' })
+    $ui.MattermostPanel.Visibility = $(if ($Name -eq 'Mattermost') { 'Visible' } else { 'Collapsed' })
     $ui.StepText.Text = switch ($Name) {
-        'Welcome' { '1 / 5  PC 확인' }
-        'Plan' { '2 / 5  설치 계획과 승인' }
-        'Work' { '3 / 5  설치와 검증' }
-        'Setup' { '4 / 5  Codex 인증과 모델' }
-        default { '5 / 5  에이전트와 연구실 연결' }
+        'Welcome' { '1 / 6  PC 확인' }
+        'Plan' { '2 / 6  설치 계획과 승인' }
+        'Work' { '3 / 6  설치와 검증' }
+        'Mattermost' { '4 / 6  Mattermost Desktop과 서버 연결' }
+        'Setup' { '5 / 6  Codex 인증과 모델' }
+        default { '6 / 6  에이전트와 연구실 연결' }
     }
 }
 
@@ -277,7 +287,7 @@ function Complete-Worker {
     $script:transportErr = $null
     if ($verifiedSuccess) {
         $script:existingInstallSetup = $false
-        Show-SetupStep
+        Show-MattermostStep
     }
 }
 
@@ -352,7 +362,106 @@ function Show-InstallStartFailure {
 function Open-ExistingInstallSetupStep {
     if (-not $script:existingInstallSetupAvailable) { return }
     $script:existingInstallSetup = $true
-    Show-SetupStep
+    Show-MattermostStep
+}
+
+function Show-MattermostStep {
+    Show-WizardPanel 'Mattermost'
+    if (-not $ui.MattermostServerURL.Text) { $ui.MattermostServerURL.Text = $ui.LabMattermostURL.Text }
+    $ui.MattermostStatus.Text = '서버 주소를 확인하고 설치·등록에 동의하세요. Mattermost가 실행 중이라면 서버 추가 전에 트레이에서 종료해야 합니다.'
+}
+
+function Set-MattermostControls {
+    param([bool]$Busy)
+    foreach ($name in @('MattermostServerURL', 'MattermostServerName', 'MattermostApproval', 'MattermostCloseButton')) { $ui[$name].IsEnabled = -not $Busy }
+    $ui.MattermostApplyButton.IsEnabled = (-not $Busy -and $ui.MattermostApproval.IsChecked -eq $true)
+    $ready = (-not $Busy -and $null -ne $script:mattermostResult)
+    foreach ($name in @('MattermostNextButton', 'MattermostOpenButton', 'MattermostBrowserButton')) { $ui[$name].IsEnabled = $ready }
+}
+
+function Read-MattermostEvents {
+    if (-not $script:mattermostOut -or -not (Test-Path -LiteralPath $script:mattermostOut)) { return }
+    $lines = @([IO.File]::ReadAllLines($script:mattermostOut, [Text.Encoding]::UTF8))
+    while ($script:mattermostLines -lt $lines.Count) {
+        $line = $lines[$script:mattermostLines]
+        try { $event = $line | ConvertFrom-Json -ErrorAction Stop } catch {
+            if ($script:mattermostLines -eq ($lines.Count - 1) -and -not $script:mattermostWorker.HasExited) { return }
+            $script:mattermostLines++; continue
+        }
+        $script:mattermostLines++
+        if (-not $event.PSObject.Properties['type']) { continue }
+        if ($event.type -in @('stage','complete','error')) {
+            $ui.MattermostStatus.AppendText((Protect-HermesLogText ([string]$event.message)) + [Environment]::NewLine)
+            $ui.MattermostStatus.ScrollToEnd()
+            if ($event.PSObject.Properties['percent']) { $ui.MattermostProgress.Value = [double]$event.percent }
+            if ($event.type -eq 'complete' -and $event.PSObject.Properties['data'] -and $event.data.Ready) { $script:mattermostResult = $event.data }
+        }
+    }
+}
+
+function Complete-MattermostWorker {
+    $script:mattermostTimer.Stop()
+    try {
+        $script:mattermostWorker.WaitForExit()
+        Read-MattermostEvents
+        if ($script:mattermostWorker.ExitCode -ne 0 -or $null -eq $script:mattermostResult) {
+            $script:mattermostResult = $null
+            if (Test-Path -LiteralPath $script:mattermostErr) {
+                $errorText = [IO.File]::ReadAllText($script:mattermostErr)
+                if ($errorText) { $ui.MattermostStatus.AppendText((Protect-HermesLogText $errorText) + [Environment]::NewLine) }
+            }
+            $ui.MattermostStatus.AppendText('설치·등록을 완료하지 못했습니다. 안내를 확인한 뒤 같은 버튼으로 다시 시도하세요.')
+        } else {
+            $ui.LabMattermostURL.Text = $script:mattermostResult.ServerURL
+            if ($script:mattermostResult.BackupPath) { $ui.MattermostStatus.AppendText("`n기존 설정 사본: $($script:mattermostResult.BackupPath)") }
+            if ($script:mattermostResult.RebootRequired) { $ui.MattermostStatus.AppendText("`nWindows 재부팅이 필요합니다. 저장 후 재부팅하세요.") }
+            if ($script:mattermostResult.ServerReachable) { $ui.MattermostStatus.AppendText("`n서버 상태 확인: 정상 응답") }
+            else { $ui.MattermostStatus.AppendText("`n서버 상태 확인 실패: 주소와 NetBird 연결을 확인하세요. 서버 등록은 보존되었으며 다시 시도할 수 있습니다.") }
+            $ui.MattermostStatus.AppendText("`n앱에서 해당 서버를 선택해 로그인하세요. 마법사는 사람 계정 로그인 성공 여부를 자동 확인하지 않습니다.")
+        }
+    } catch {
+        $script:mattermostResult = $null
+        $ui.MattermostStatus.AppendText("`n결과 확인 실패: " + (Protect-HermesLogText $_.Exception.Message))
+    } finally {
+        $script:mattermostWorker.Dispose(); $script:mattermostWorker = $null
+        foreach ($path in @($script:mattermostOut, $script:mattermostErr)) { if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue } }
+        Set-MattermostControls $false
+    }
+}
+
+function Start-MattermostWorker {
+    if ($null -ne $script:mattermostWorker -or $ui.MattermostApproval.IsChecked -ne $true) { return }
+    try {
+        $url = ConvertTo-HermesMattermostURL $ui.MattermostServerURL.Text
+        [void](Merge-HermesMattermostServer -ConfigText $null -ServerURL $url -ServerName $ui.MattermostServerName.Text)
+        $script:mattermostResult = $null
+        $script:mattermostLines = 0
+        $ui.MattermostStatus.Text = "Mattermost Desktop 준비를 시작합니다.`n"
+        $ui.MattermostProgress.Value = 0
+        Set-MattermostControls $true
+        $transport = Join-Path $script:paths.RuntimeRoot 'ui-transport'
+        if (-not (Test-Path -LiteralPath $transport)) { New-Item -ItemType Directory -Path $transport -Force | Out-Null }
+        $stamp = [Guid]::NewGuid().ToString('N')
+        $script:mattermostOut = Join-Path $transport "mattermost-$stamp.out"
+        $script:mattermostErr = Join-Path $transport "mattermost-$stamp.err"
+        $arguments = @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'HermesEasySetup.ps1'),
+            '-Action','MattermostSetup','-Apply','-JsonEvents','-MattermostServerURL',$url,'-MattermostServerName',$ui.MattermostServerName.Text,'-RuntimeRoot',$script:paths.RuntimeRoot)
+        $argumentLine = ($arguments | ForEach-Object { ConvertTo-WindowsProcessArgument ([string]$_) }) -join ' '
+        $script:mattermostWorker = Start-Process -FilePath (Get-HermesPowerShellExecutable) -ArgumentList $argumentLine -WindowStyle Hidden -PassThru -RedirectStandardOutput $script:mattermostOut -RedirectStandardError $script:mattermostErr
+        [void]$script:mattermostWorker.Handle
+        $script:mattermostTimer = New-Object Windows.Threading.DispatcherTimer
+        $script:mattermostTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $script:mattermostTimer.Add_Tick({
+            if ($null -eq $script:mattermostWorker) { return }
+            if ($script:mattermostWorker.HasExited) { Complete-MattermostWorker } else {
+                try { Read-MattermostEvents } catch { $ui.MattermostStatus.AppendText("`n진행 상태를 다시 확인 중입니다.") }
+            }
+        })
+        $script:mattermostTimer.Start()
+    } catch {
+        $ui.MattermostStatus.Text = Protect-HermesLogText $_.Exception.Message
+        if ($null -eq $script:mattermostWorker) { Set-MattermostControls $false }
+    }
 }
 
 function Refresh-CodexSetupState {
@@ -751,6 +860,28 @@ $ui.InstallButton.Add_Click({
     try { Start-InstallWorker } catch { Show-InstallStartFailure -Message $_.Exception.Message }
 })
 $ui.FinishButton.Add_Click({ $window.Close() })
+$ui.MattermostApplyButton.Add_Click({ Start-MattermostWorker })
+$ui.MattermostApproval.Add_Checked({ Set-MattermostControls ($null -ne $script:mattermostWorker) })
+$ui.MattermostApproval.Add_Unchecked({ Set-MattermostControls ($null -ne $script:mattermostWorker) })
+foreach ($name in @('MattermostServerURL','MattermostServerName')) {
+    $ui[$name].Add_TextChanged({ $script:mattermostResult = $null; $ui.MattermostApproval.IsChecked = $false; Set-MattermostControls ($null -ne $script:mattermostWorker) })
+}
+$ui.MattermostNextButton.Add_Click({
+    if ($null -ne $script:mattermostResult) {
+        try { Show-SetupStep } catch { Show-WizardPanel 'Mattermost'; $ui.MattermostStatus.Text = Protect-HermesLogText $_.Exception.Message }
+    }
+})
+$ui.MattermostOpenButton.Add_Click({
+    if ($null -ne $script:mattermostResult) {
+        try { Start-Process -FilePath $script:mattermostResult.AppPath | Out-Null } catch { $ui.MattermostStatus.Text = 'Mattermost 앱을 열지 못했습니다. 시작 메뉴에서 실행하세요.' }
+    }
+})
+$ui.MattermostBrowserButton.Add_Click({
+    if ($null -ne $script:mattermostResult) {
+        try { Start-Process -FilePath (ConvertTo-HermesMattermostURL $script:mattermostResult.ServerURL) | Out-Null } catch { $ui.MattermostStatus.Text = '브라우저를 열지 못했습니다. 서버 주소를 직접 여세요.' }
+    }
+})
+$ui.MattermostCloseButton.Add_Click({ $window.Close() })
 $ui.SetupLaterButton.Add_Click({ })
 $ui.SetupStartButton.Add_Click({ Start-SetupWorker })
 $ui.SetupOpenOAuthButton.Add_Click({
@@ -793,7 +924,10 @@ $ui.BundleButton.Add_Click({
     } catch { [Windows.MessageBox]::Show((Protect-HermesLogText $_.Exception.Message), '진단 ZIP 실패', 'OK', 'Error') | Out-Null }
 })
 $window.Add_Closing({ param($sender, $eventArgs)
-    if ($null -ne $script:worker -and -not $script:worker.HasExited) {
+    if ($null -ne $script:mattermostWorker) {
+        $eventArgs.Cancel = $true
+        [Windows.MessageBox]::Show('Mattermost 설치·등록이 진행 중입니다. 완료 또는 오류 안내가 표시될 때까지 기다려 주세요.', 'Hermes Easy Setup') | Out-Null
+    } elseif ($null -ne $script:worker -and -not $script:worker.HasExited) {
         $eventArgs.Cancel = $true
         [Windows.MessageBox]::Show('설치 단계가 실행 중입니다. 각 단계에는 제한 시간이 있으며, 현재 프로세스 트리를 임의 종료하지 않도록 창을 닫지 않습니다.', 'Hermes Easy Setup') | Out-Null
     } elseif ($null -ne $script:setupWorker -and -not $script:setupWorker.HasExited) {
@@ -806,4 +940,12 @@ $window.Add_Closing({ param($sender, $eventArgs)
 })
 
 Show-WizardPanel 'Welcome'
+if ($SmokeTest) {
+    if ($ui.ApprovalCheck.IsChecked -eq $true -or $ui.MattermostApproval.IsChecked -eq $true -or
+        $ui.InstallButton.IsEnabled -or $ui.MattermostApplyButton.IsEnabled -or $ui.SetupLabButton.IsEnabled -or
+        -not [string]::IsNullOrWhiteSpace($ui.LabMattermostURL.Text)) { throw 'User wizard must start without approval or a preset server.' }
+    $window.Close()
+    Write-Output 'PASS user WPF controls and default-deny state; no installation performed'
+    return
+}
 $window.ShowDialog() | Out-Null

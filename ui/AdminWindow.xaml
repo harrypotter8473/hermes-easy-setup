@@ -1,0 +1,98 @@
+﻿<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Mattermost Admin Setup — 로컬 테스트" Width="900" Height="890" MinWidth="760" MinHeight="680" WindowStartupLocation="CenterScreen" Background="#F5F7FB" FontFamily="Segoe UI, Malgun Gothic" FontSize="13">
+    <Window.Resources>
+        <Style TargetType="TextBox"><Setter Property="Padding" Value="8,5"/><Setter Property="Margin" Value="0,4,16,10"/></Style>
+        <Style TargetType="PasswordBox"><Setter Property="Padding" Value="8,5"/><Setter Property="Margin" Value="0,4,16,10"/></Style>
+        <Style TargetType="Button"><Setter Property="Padding" Value="14,7"/><Setter Property="Margin" Value="0,0,8,0"/></Style>
+    </Window.Resources>
+    <Grid Margin="24">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock Text="Mattermost Admin Setup" FontSize="28" FontWeight="SemiBold" Foreground="#172A4A"/>
+            <TextBlock Text="관리자용 · 새 서버, 관리자, NetBird 공유, Bot Control, 봇·토큰" Margin="0,4,0,14" Foreground="#56657D"/>
+            <Border Background="#E8EEFF" CornerRadius="6" Padding="12" Margin="0,0,0,14">
+                <TextBlock TextWrapping="Wrap" Text="별도 Docker Desktop 테스트 서버를 만듭니다. GB10·기존 Mattermost는 변경하지 않습니다. 기본은 이 PC 전용이며, NetBird 공유를 선택해야 다른 연구실 PC에서 접속을 시도할 수 있습니다."/>
+            </Border>
+        </StackPanel>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="0,0,8,0">
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                    <Button x:Name="CheckButton" Content="Docker 준비 확인"/>
+                    <Button x:Name="DockerButton" Content="Docker Desktop 열기"/>
+                </StackPanel>
+                <TextBlock x:Name="DockerStatus" Text="Docker Desktop의 Linux 컨테이너 엔진을 켠 뒤 준비 확인을 누르세요." TextWrapping="Wrap" Margin="0,0,0,12" Foreground="#56657D"/>
+                <Border Background="White" Padding="16" CornerRadius="6">
+                    <StackPanel x:Name="FormPanel">
+                        <TextBlock Text="1. 서버 정보" FontWeight="SemiBold" FontSize="16" Margin="0,0,0,10"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+                            <StackPanel><TextBlock Text="서버 ID (소문자·숫자·하이픈)"/><TextBox x:Name="ServerId" Text="lab-admin-test"/></StackPanel>
+                            <StackPanel Grid.Column="1"><TextBlock Text="서버 표시 이름"/><TextBox x:Name="SiteName" Text="INFONET Test"/></StackPanel>
+                            <StackPanel Grid.Row="1"><TextBlock Text="팀 주소 이름"/><TextBox x:Name="TeamName" Text="infonet-test"/></StackPanel>
+                            <StackPanel Grid.Row="1" Grid.Column="1"><TextBlock Text="팀 표시 이름"/><TextBox x:Name="TeamDisplayName" Text="INFONET Test"/></StackPanel>
+                            <StackPanel Grid.Row="2"><TextBlock Text="기본 채널 이름"/><TextBox x:Name="ChannelName" Text="agent"/></StackPanel>
+                            <StackPanel Grid.Row="2" Grid.Column="1"><TextBlock Text="로컬 포트 (기존 8065 사용 안 함)"/><TextBox x:Name="Port" Text="18065"/></StackPanel>
+                        </Grid>
+                        <TextBlock Text="2. 최초 관리자 계정" FontWeight="SemiBold" FontSize="16" Margin="0,4,0,10"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+                            <StackPanel><TextBlock Text="사용자 이름 (영문 소문자로 시작)"/><TextBox x:Name="AdminUsername" Text="labadmin"/></StackPanel>
+                            <StackPanel Grid.Column="1"><TextBlock Text="이메일 주소"/><TextBox x:Name="AdminEmail"/></StackPanel>
+                            <StackPanel Grid.Row="1"><TextBlock Text="비밀번호 (12자 이상·대소문자·숫자·특수문자)"/><PasswordBox x:Name="AdminPassword"/></StackPanel>
+                            <StackPanel Grid.Row="1" Grid.Column="1"><TextBlock Text="비밀번호 확인"/><PasswordBox x:Name="PasswordConfirm"/></StackPanel>
+                        </Grid>
+                        <TextBlock x:Name="StorageNote" TextWrapping="Wrap" Foreground="#66758B" FontSize="12" Margin="0,2,0,8"/>
+                        <TextBlock Text="서버 공개 범위 (기존 서버 변경 시에도 동일 입력·암호 필요)"/>
+                        <ComboBox x:Name="NetworkMode" SelectedIndex="0" Margin="0,4,16,8" Padding="8,5">
+                            <ComboBoxItem Content="현재 범위 유지 / 새 서버는 이 PC 전용"/>
+                            <ComboBoxItem Content="NetBird로 공유 — 아래 IP + localhost에만 바인딩"/>
+                            <ComboBoxItem Content="공유 해제 — 이 PC에서만 접속"/>
+                        </ComboBox>
+                        <TextBlock Text="이 서버 PC의 NetBird IPv4 (사용자 PC의 Dashboard 주소와 다름)"/>
+                        <TextBox x:Name="NetworkAddress"/>
+                        <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="#66758B" Text="공유 선택 시 현재 NetBird 주소를 검증합니다. 방화벽·NetBird 정책은 자동 변경하지 않습니다. 다른 PC의 접속 성공은 별도 확인해야 합니다." Margin="0,0,0,8"/>
+                        <CheckBox x:Name="ResumeCheck" Content="이 마법사에서 만든 같은 서버를 이어서 설정 (기존 입력·암호 사용)" Margin="0,4,0,8"/>
+                        <CheckBox x:Name="BotControlCheck" Content="Bot Control 0.6.2 설치 및 관리자 접근 확인 (기본 포함)" IsChecked="True" Margin="0,0,0,8"/>
+                        <CheckBox x:Name="ConsentCheck" Content="별도 서버 생성·선택한 공개 범위 변경·Bot Control 설치에 동의합니다." Margin="0,0,0,6"/>
+                        <TextBlock TextWrapping="Wrap" Foreground="#66758B" FontSize="12" Text="데이터는 Docker named volume에 유지됩니다. Docker Desktop이 실행되면 서버가 다시 시작되지만 Windows 로그인 전 무인 기동은 보장하지 않습니다. 메일 발송은 설정하지 않습니다."/>
+                    </StackPanel>
+                </Border>
+                <ProgressBar x:Name="Progress" Height="8" Minimum="0" Maximum="100" Margin="0,16,0,8"/>
+                <TextBox x:Name="Log" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="120" Background="White" Margin="0,0,0,12"/>
+                <Border Background="White" Padding="16" CornerRadius="6">
+                    <StackPanel x:Name="BotPanel">
+                        <TextBlock Text="3. 봇 생성·토큰 발급" FontWeight="SemiBold" FontSize="16" Margin="0,0,0,8"/>
+                        <TextBlock TextWrapping="Wrap" Text="위 서버 설정을 먼저 완료하세요. 위에 입력된 서버의 팀·채널에 일반 봇 멤버로 추가합니다. 같은 이름·설명으로 재시도하면 기존 발급 결과를 재사용합니다. 다른 봇은 사용자 이름을 바꿔 추가하세요." Margin="0,0,0,10"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+                            <StackPanel><TextBlock Text="봇 사용자 이름 (예: harry_bot)"/><TextBox x:Name="BotUsername"/></StackPanel>
+                            <StackPanel Grid.Column="1"><TextBlock Text="봇 표시 이름"/><TextBox x:Name="BotDisplayName"/></StackPanel>
+                        </Grid>
+                        <TextBlock Text="Mattermost 봇 설명 (Hermes 역할·메모리 설정은 별도)"/>
+                        <TextBox x:Name="BotDescription"/>
+                        <TextBlock Text="위 관리자 계정의 비밀번호를 다시 입력"/>
+                        <PasswordBox x:Name="BotAdminPassword"/>
+                        <CheckBox x:Name="BotConsentCheck" Content="지정한 테스트 서버에 봇과 토큰을 생성하고 팀·채널에 추가하는 데 동의합니다." Margin="0,0,0,10"/>
+                        <Button x:Name="BotCreateButton" Content="봇 생성 / 기존 발급 결과 확인" HorizontalAlignment="Left" IsEnabled="False"/>
+                        <TextBox x:Name="BotResult" IsReadOnly="True" TextWrapping="Wrap" MinHeight="65" Margin="0,12,0,8" Text="발급 전입니다. 토큰 원문은 로그·화면에 표시하지 않습니다."/>
+                        <StackPanel Orientation="Horizontal">
+                            <Button x:Name="CopyBotTokenButton" Content="토큰 복사" IsEnabled="False"/>
+                            <Button x:Name="CopyChannelButton" Content="Home Channel ID 복사" IsEnabled="False"/>
+                        </StackPanel>
+                        <TextBlock TextWrapping="Wrap" Foreground="#66758B" FontSize="12" Margin="0,8,0,0" Text="토큰은 이 Windows 계정으로만 복호화 가능한 파일에 보관합니다. 복사 후 사용자용 마법사에 붙여 넣으세요. 클립보드는 60초 뒤 같은 값일 때만 비웁니다(클립보드 기록·동기화에는 남을 수 있습니다). 다른 PC는 서버의 NetBird 주소와 자신 PC의 NetBird Dashboard 주소를 구분해서 입력하세요."/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+            <Button x:Name="OpenButton" Content="서버 열기" IsEnabled="False"/>
+            <Button x:Name="ConsoleButton" Content="관리 콘솔" IsEnabled="False"/>
+            <Button x:Name="BotControlButton" Content="Bot Control" IsEnabled="False"/>
+            <Button x:Name="CreateButton" Content="서버·관리자 생성" IsEnabled="False" Background="#2454D6" Foreground="White"/>
+            <Button x:Name="CloseButton" Content="닫기" Margin="0"/>
+        </StackPanel>
+    </Grid>
+</Window>

@@ -1,5 +1,15 @@
 # Hermes Easy Setup
 
+## 실행 파일 선택
+
+- **1인 연구실 초기 버전:** `Start-HermesResearchSetup.cmd` — 같은 Windows PC에 Mattermost 로컬 서버·Hermes·독립 에이전트 4개를 구성합니다. 이름·봇 토큰·역할을 한 페이지에서 설정하고 역할 지침을 나중에 수정할 수 있습니다. [개인 연구실 안내](docs/research-guide.ko.md)
+- **사용자용:** `Start-HermesEasySetup.cmd` — 기존 연구실 서버에 Mattermost Desktop·Hermes 봇 연결.
+- **관리자용 (Windows 테스트 배포):** `Start-HermesAdminSetup.cmd` — 별도 Docker Mattermost 서버·시스템 관리자·팀·채널, Bot Control, 봇·토큰 발급, 선택적 NetBird 공유. [관리자 설치 안내](docs/admin-guide.ko.md)
+
+관리자용은 Windows x64 Docker Desktop의 Linux 엔진이 필요합니다. 기본은 `127.0.0.1:18065`이며 NetBird 공유를 명시적으로 선택하면 현재 서버 PC의 NetBird IP에도 바인딩합니다. 기존 서버/GB10은 변경하지 않습니다. Bot Control 0.6.2를 동봉하고 설치 후 업로드를 잠급니다. 관리자 PC에도 Hermes가 필요하면 사용자용 마법사를 별도로 실행합니다. [5단계 검증 범위](docs/admin-step5-validation.ko.md)
+
+개인 연구실용에서는 Docker 설치 위치·공식 서명·Linux 엔진·PC 조건을 확인하고, 미설치 시 별도 동의 후 고정 공식 설치 파일을 다운로드·검증·설치합니다. Docker 약관은 직접 확인하며 Windows 기능·보안 정책·재부팅을 자동 처리하지 않습니다. 설치 완료와 엔진 준비 완료는 구분합니다. Docker 없는 설치 경로는 대안 안내만 제공하며 아직 구현되지 않았습니다.
+
 Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes-agent)를 설치하는 한국어 안전 마법사입니다.
 
 이 프로젝트는 Nous Research의 공식 제품이 아닌 비공식 커뮤니티 도구입니다. Hermes 자체의 사용법과 지원 범위는 [공식 문서](https://hermes-agent.nousresearch.com/docs/)를 기준으로 합니다.
@@ -12,8 +22,10 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 
 ## 현재 상태
 
-- 버전 `0.3.0` Windows 네이티브 연구실 통합 MVP
-- 5단계 마법사 안에서 Hermes 설치·검증, OpenAI Codex OAuth와 모델 선택, 독립 프로필, Mattermost, NetBird Dashboard, 부팅 Gateway, Bot Control 등록과 매주 업데이트까지 구성합니다.
+- 버전 `0.8.0` Windows 네이티브 사용자용 마법사 + 별도 관리자 테스트 마법사
+- 6개 화면에서 Hermes 설치·검증, Mattermost Desktop 설치·서버 등록, OpenAI Codex OAuth와 모델 선택, 독립 프로필, NetBird Dashboard, 부팅 Gateway, Bot Control 등록과 매주 업데이트까지 구성합니다.
+- 위 6개 화면은 사용자용입니다. 관리자용 서버 설치·계정 생성·Bot Control·봇/토큰 발급은 별도 `Start-HermesAdminSetup.cmd`에서 진행합니다. 프로젝트의 5단계 개발 계획과 사용자 마법사의 6개 화면은 별개입니다.
+- 봇 발급·재사용, 공유 실패 시 롤백, 사용자 봇 토큰·채널 사전 검사, 관리자용/사용자용 ZIP 분리 패키징을 지원합니다. 다른 PC에서 실제 Hermes·LLM 응답까지의 최종 승인은 [두 PC 체크리스트](docs/two-pc-checklist.ko.md)를 따라 진행해야 합니다.
 - Nous Portal·OpenRouter·일반 provider 목록·Discord·Slack·Telegram·Spotify·클라우드 터미널·미디어 provider·전체 도구 설정 화면은 이 연구실용 흐름에서 노출하지 않습니다.
 - 이전 마법사가 남긴 exact `Completed` 설치 기록이 안전 조건을 충족하면 재설치 없이 Codex 인증과 연구실 연결을 계속할 수 있습니다.
 - 선택적 Browser/TUI npm 의존성, Computer Use 사전 설치와 Hermes Desktop 자동 빌드는 후속 버전으로 미룹니다. v0.1.2 GUI는 Computer Use/Desktop 옵션을 고정하며 CLI 설치에는 `-SkipComputerUse`가 필요합니다.
@@ -27,9 +39,19 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 
 현재 배포물은 코드 서명이 없는 `.cmd`/PowerShell 소스입니다. 공식 Hermes 설치기나 Nous Research의 서명을 대신하지 않습니다. 제거·초기화 기능도 제공하지 않습니다.
 
+## 개인 연구실용 / 관리자용 / 사용자용 ZIP 만들기
+
+저장소 소스에서 Windows PowerShell로 실행합니다. 출력 폴더는 소스 폴더 밖의 새 경로를 지정하세요.
+
+```powershell
+.\Build-Distributions.ps1 -DestinationRoot C:\Temp\Hermes-0.8.0
+```
+
+`Hermes-Research-Setup-0.8.0.zip`, `Hermes-Admin-Setup-0.8.0.zip`, `Hermes-User-Setup-0.8.0.zip`, `SHA256SUMS.txt`가 만들어집니다. ZIP 안에는 파일별 `FILES.sha256`도 있습니다. 소스 허용 목록만 패키징하며 개인 설치 상태·토큰·로그·Git 기록은 포함하지 않습니다. 같은 이름의 파일은 덮어쓰지 않습니다. 생성·해시 대조·압축 해제 후 세 GUI의 비설치 검사는 `tests/Run-DistributionTests.ps1`로 실행합니다. 빌드가 GitHub 게시나 코드 서명을 수행하지는 않습니다.
+
 ## 빠른 시작
 
-다른 Windows PC에서 테스트할 때는 GitHub의 **Code → Download ZIP**으로 `main`의 최신 코드를 받으세요. 기존 Release에는 최근 수정사항이 아직 포함되지 않을 수 있습니다. 압축을 푼 폴더에서 실행해야 합니다.
+다른 Windows PC에서 테스트할 때는 관리자가 전달한 `Hermes-User-Setup-<버전>.zip` 또는 해당 버전이 게시된 저장소/Release를 사용하세요. 로컬 빌드가 GitHub에 자동 업로드되는 것은 아닙니다. 압축을 모두 푼 폴더에서 실행해야 합니다.
 
 미리 준비할 항목:
 
@@ -44,13 +66,26 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 4. `PC 확인` 결과를 읽습니다.
 5. 설치 옵션, 세 경로, tag 객체, peeled commit, 설치기와 manifest 해시를 검토합니다.
 6. 동의 체크박스를 직접 선택한 뒤 설치를 시작합니다.
-7. 4단계에서 OpenAI Codex 인증 상태를 확인합니다. 로그인이 필요하면 버튼을 누르고 열린 브라우저에서 OAuth만 승인합니다.
-8. 설치된 Hermes가 제공하는 Codex 모델 목록에서 기본 모델을 선택합니다. 기본 선택은 `gpt-5.6-terra`입니다.
-9. 5단계에서 프로필 이름·Full name·역할, Mattermost URL·봇 토큰·홈 채널과 NetBird IP를 입력합니다. Dashboard는 미리 입력된 `admin` / `12345678`로 연결하거나 원하는 값으로 바꿀 수 있습니다.
-10. UAC를 승인하면 Gateway와 Dashboard가 숨김 S4U 작업으로 Windows 부팅 시 시작되고, 매주 일요일 04:00 업데이트 작업이 등록됩니다.
-11. v0.1.1 화면에서 설치 검증 로그는 성공했지만 마지막에 실패로 표시된 PC라면 `PC 확인`을 다시 실행하세요. 완료 기록·official origin·pin·경로가 모두 맞으면 `기존 설치 설정 계속`이 나타납니다.
+7. 4단계에서 Mattermost 서버 주소와 표시 이름을 확인하고 설치·등록을 승인합니다. 기존 Desktop은 재사용하며 없는 경우만 공식 x64 MSI를 설치합니다. 앱을 열어 해당 서버의 사람 계정으로 로그인합니다.
+8. 5단계에서 OpenAI Codex 인증 상태를 확인합니다. 로그인이 필요하면 버튼을 누르고 열린 브라우저에서 OAuth만 승인합니다.
+9. 설치된 Hermes가 제공하는 Codex 모델 목록에서 기본 모델을 선택합니다. 기본 선택은 `gpt-5.6-terra`입니다.
+10. 6단계에서 프로필 이름·Full name·역할, Mattermost URL·봇 토큰·홈 채널과 NetBird IP를 입력합니다. Dashboard는 미리 입력된 `admin` / `12345678`로 연결하거나 원하는 값으로 바꿀 수 있습니다.
+11. UAC를 승인하면 Gateway와 Dashboard가 숨김 S4U 작업으로 Windows 부팅 시 시작되고, 매주 일요일 04:00 업데이트 작업이 등록됩니다.
+12. 설치 검증 로그는 성공했지만 마지막에 실패로 표시된 PC라면 `PC 확인`을 다시 실행하세요. 완료 기록·official origin·pin·경로가 모두 맞으면 `기존 설치 설정 계속`이 나타납니다.
 
-Hermes 설치와 Codex 인증에는 관리자 권한이 필요하지 않습니다. Windows 부팅 작업을 등록하는 시점에는 UAC 승인이 한 번 필요합니다. 작업은 관리자나 SYSTEM이 아니라 현재 사용자 권한의 S4U 방식으로 실행되며 Windows 암호를 저장하지 않습니다.
+Hermes 설치와 Codex 인증에는 관리자 권한이 필요하지 않습니다. Mattermost Desktop을 새로 설치할 때와 Windows 부팅 작업을 등록할 때 각각 UAC 승인이 필요할 수 있습니다. 부팅 작업은 관리자나 SYSTEM이 아니라 현재 사용자 권한의 S4U 방식으로 실행되며 Windows 암호를 저장하지 않습니다.
+
+## Mattermost Desktop 연결
+
+- 공식 `6.3.0` x64 MSI의 URL·SHA-256을 `config/mattermost-desktop.json`에 고정하고 배포자 Authenticode 서명까지 확인합니다. 검증 실패 시 실행하지 않습니다.
+- 설치된 MSI/EXE Desktop을 재사용하며 자동 업그레이드·다운그레이드·제거하지 않습니다. Store 또는 경로를 확인할 수 없는 설치는 중복 설치 없이 중단합니다.
+- `%APPDATA%\Mattermost\config.json`의 v1~v3 `teams`, v4 `servers` 형식을 구분합니다. 기존 서버·순서·선택·기타 설정은 보존하고 같은 URL은 중복 추가하지 않습니다.
+- 변경 전 `config.before-hermes-<고유값>.json` 사본을 같은 폴더에 남깁니다. 알 수 없는 형식, 손상 파일, 링크 경로는 변경하지 않습니다. 쿠키·로그인 저장소는 접근하지 않습니다.
+- 서버를 추가해야 하는데 앱이 실행 중이면 트레이에서 종료한 뒤 재시도하도록 안내합니다. 강제 종료하지 않습니다.
+- 서버 ping 결과와 사람 계정 로그인은 별개입니다. 오프라인이면 NetBird·주소를 확인한 뒤 재시도하고, 계정이 없으면 관리자의 초대 링크로 가입합니다. 봇 토큰은 로그인 비밀번호가 아닙니다.
+- CLI: `-Action MattermostSetup -Apply -MattermostServerURL <서버주소> -MattermostServerName <표시이름>`
+
+근거: [공식 Windows 배포 안내](https://docs.mattermost.com/deployment-guide/desktop/silent-windows-desktop-distribution), [6.3.0 실제 설정 형식](https://github.com/mattermost/desktop/blob/v6.3.0/src/common/config/defaultPreferences.ts).
 
 CLI로 계획만 확인할 수도 있습니다.
 

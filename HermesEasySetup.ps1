@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Diagnose', 'Plan', 'Install', 'Verify', 'Setup', 'CodexStatus', 'CodexAuth', 'LabSetup', 'Bundle')]
+    [ValidateSet('Diagnose', 'Plan', 'Install', 'Verify', 'Setup', 'CodexStatus', 'CodexAuth', 'LabSetup', 'MattermostSetup', 'DockerStatus', 'DockerInstall', 'AdminPreflight', 'AdminSetup', 'AdminBotSetup', 'ResearchTeamSetup', 'Bundle')]
     [string]$Action = 'Diagnose',
     [string]$HermesHome,
     [string]$InstallDir,
@@ -10,6 +10,7 @@ param(
     [ValidateSet('Later', 'Portal', 'Full')][string]$SetupMode = 'Portal',
     [switch]$Apply,
     [switch]$Resume,
+    [switch]$InstallBotControl,
     [switch]$ForceDownload,
     [switch]$LaunchSetup,
     [switch]$WaitForSetup,
@@ -18,7 +19,12 @@ param(
     [string]$ExpectedPlanFingerprint,
     [string]$DestinationPath,
     [string]$SourceConfigPath,
-    [string]$LabInputPath
+    [string]$LabInputPath,
+    [string]$AdminInputPath,
+    [string]$ResearchInputPath,
+    [string]$AdminRoot,
+    [string]$MattermostServerURL,
+    [string]$MattermostServerName = '연구실'
 )
 
 Set-StrictMode -Version 2.0
@@ -75,6 +81,22 @@ $eventCallback = {
 try {
     $common = @{ HermesHome = $HermesHome; InstallDir = $InstallDir; RuntimeRoot = $RuntimeRoot }
     switch ($Action) {
+        'DockerStatus' {
+            Write-ResultObject (Get-HermesDockerDesktopStatus)
+        }
+        'DockerInstall' {
+            if (-not $Apply) { throw (New-Object System.InvalidOperationException 'Docker 다운로드·설치는 -Apply 승인이 필요합니다.') }
+            $paths = Get-HermesDefaultPaths -RuntimeRoot $RuntimeRoot
+            $result = Install-HermesDockerDesktop -RuntimeRoot $paths.RuntimeRoot -Apply -ProgressCallback $eventCallback
+            $installFailed = @('InstallFailed','InstallNotDetected','InstallerStillRunning','Cancelled') -ccontains [string]$result.StatusCode
+            if ($JsonEvents) {
+                & $eventCallback ([pscustomobject]@{
+                    type = 'complete'; state = $(if ($installFailed) { 'failed' } else { 'closed' }); percent = 100
+                    message = [string]$result.Summary; data = $result
+                })
+            } else { Write-ResultObject $result }
+            if ($installFailed) { exit $exitCodes.InstallStageFailed }
+        }
         'Diagnose' {
             $result = Get-HermesPreflight @common -IncludeDesktop:$IncludeDesktop
             Write-ResultObject $result
@@ -141,6 +163,58 @@ try {
             if (-not $Apply) { throw (New-Object System.InvalidOperationException 'OpenAI Codex 인증을 시작하려면 -Apply를 함께 지정하세요.') }
             $result = Invoke-HermesCodexAuthentication @common -ProgressCallback $eventCallback
             if (-not $JsonEvents) { Write-ResultObject $result }
+        }
+        'MattermostSetup' {
+            if (-not $Apply) { throw (New-Object System.InvalidOperationException 'Mattermost Desktop 설치·서버 등록은 -Apply 승인이 필요합니다.') }
+            $paths = Get-HermesDefaultPaths -RuntimeRoot $RuntimeRoot
+            $result = Invoke-HermesMattermostSetup -ServerURL $MattermostServerURL -ServerName $MattermostServerName -RuntimeRoot $paths.RuntimeRoot -ProgressCallback $eventCallback
+            if (-not $JsonEvents) { Write-ResultObject $result }
+        }
+        'AdminPreflight' {
+            Write-ResultObject (Get-HermesAdminPreflight)
+        }
+        { $_ -in @('AdminSetup','AdminBotSetup') } {
+            if (-not $Apply) { throw (New-Object System.InvalidOperationException '새 로컬 테스트 서버를 만들려면 -Apply 승인이 필요합니다.') }
+            if ([string]::IsNullOrWhiteSpace($AdminInputPath)) { throw '암호화된 관리자 입력 파일이 필요합니다.' }
+            $paths = Get-HermesDefaultPaths -RuntimeRoot $RuntimeRoot
+            $inputPath = [IO.Path]::GetFullPath($AdminInputPath)
+            $transportRoot = [IO.Path]::GetFullPath((Join-Path $paths.RuntimeRoot 'ui-transport'))
+            if (-not (Test-HermesPathContains -ParentPath $transportRoot -ChildPath $inputPath)) { throw '관리자 입력 파일은 마법사 transport 폴더 안에 있어야 합니다.' }
+            try {
+                $inputData = Unprotect-HermesLabInput -LiteralPath $inputPath
+                $arguments = @{ InputData = $inputData; ProgressCallback = $eventCallback }
+                if ($AdminRoot) { $arguments.DeploymentRoot = $AdminRoot }
+                if ($Action -eq 'AdminBotSetup') { $result = Invoke-HermesAdminBotSetup @arguments }
+                else { $result = Invoke-HermesAdminSetup @arguments -Resume:$Resume -InstallBotControl:$InstallBotControl }
+                if (-not $JsonEvents) { Write-ResultObject $result }
+            } finally {
+                $inputData = $null
+                if (Test-Path -LiteralPath $inputPath -PathType Leaf) { Remove-Item -LiteralPath $inputPath -Force -ErrorAction SilentlyContinue }
+            }
+        }
+        'ResearchTeamSetup' {
+            if (-not $Apply) { throw (New-Object System.InvalidOperationException '연구팀 생성·변경은 -Apply 승인이 필요합니다.') }
+            if ([string]::IsNullOrWhiteSpace($ResearchInputPath)) { throw '암호화된 연구팀 입력 파일이 필요합니다.' }
+            $paths = Get-HermesDefaultPaths @common
+            $inputPath = [IO.Path]::GetFullPath($ResearchInputPath)
+            $transportRoot = [IO.Path]::GetFullPath((Join-Path $paths.RuntimeRoot 'ui-transport'))
+            if (-not (Test-HermesPathContains -ParentPath $transportRoot -ChildPath $inputPath)) { throw '연구팀 입력 파일은 마법사 transport 폴더 안에 있어야 합니다.' }
+            & (Get-Module HermesEasySetup.Admin) { param($path) Assert-HermesAdminPath $path } $inputPath
+            try {
+                $researchInput = Unprotect-HermesLabInput -LiteralPath $inputPath
+                $result = Invoke-HermesResearchTeamSetup -InputObject $researchInput @common -ReuseExistingProfiles:$Resume -ProgressCallback $eventCallback
+                if ($JsonEvents) {
+                    & $eventCallback ([pscustomobject]@{
+                        type = 'complete'; state = $(if ($result.Succeeded) { 'succeeded' } else { 'failed' })
+                        percent = 100; message = $(if ($result.Succeeded) { '네 연구 에이전트의 프로필과 Gateway 기동을 확인했습니다.' } else { '일부 연구 에이전트를 구성하지 못했습니다. 성공한 프로필은 보존했습니다.' })
+                        data = $result
+                    })
+                } else { Write-ResultObject $result }
+                if (-not $result.Succeeded) { exit $exitCodes.VerificationFailed }
+            } finally {
+                $researchInput = $null
+                if (Test-Path -LiteralPath $inputPath -PathType Leaf) { Remove-Item -LiteralPath $inputPath -Force -ErrorAction SilentlyContinue }
+            }
         }
         'LabSetup' {
             if (-not $Apply) {

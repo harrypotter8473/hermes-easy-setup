@@ -7,15 +7,20 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $errors = New-Object System.Collections.Generic.List[string]
 
 $expectedModules = @(
+    'HermesEasySetup.Admin.psm1',
     'HermesEasySetup.Bundle.psm1',
     'HermesEasySetup.Codex.psm1',
     'HermesEasySetup.Core.psm1',
+    'HermesEasySetup.Docker.psm1',
     'HermesEasySetup.Execution.psm1',
     'HermesEasySetup.InstallEngine.psm1',
     'HermesEasySetup.Lab.psm1',
     'HermesEasySetup.Loader.psm1',
+    'HermesEasySetup.Mattermost.psm1',
     'HermesEasySetup.Preflight.psm1',
     'HermesEasySetup.Protocol.psm1',
+    'HermesEasySetup.Research.psm1',
+    'HermesEasySetup.ResearchRuntime.psm1',
     'HermesEasySetup.StateStore.psm1'
 ) | Sort-Object
 $actualModules = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src') -Filter '*.psm1' -File | ForEach-Object { $_.Name } | Sort-Object)
@@ -44,7 +49,7 @@ foreach ($directory in @(Get-ChildItem -LiteralPath $projectRoot -Recurse -Direc
 }
 
 $configFiles = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'config') -File | ForEach-Object { $_.Name } | Sort-Object)
-$expectedConfig = @('hermes-manifest.json', 'hermes-source.json')
+$expectedConfig = @('bot-control.json', 'docker-desktop.json', 'hermes-manifest.json', 'hermes-source.json', 'mattermost-desktop.json', 'mattermost-server.json')
 if (($configFiles -join "`n") -cne ($expectedConfig -join "`n")) { $errors.Add("config allowlist mismatch: $($configFiles -join ', ')") }
 
 if ($errors.Count -gt 0) {

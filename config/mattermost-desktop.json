@@ -1,0 +1,6 @@
+{
+  "version": "6.3.0",
+  "architecture": "x64",
+  "url": "https://github.com/mattermost/desktop/releases/download/v6.3.0/mattermost-desktop-6.3.0-win-x64.msi",
+  "sha256": "0615ee83c6a94ed24b6ae08a7ca4cd27d1ea079b957e6b788204b1a49a3494bc"
+}

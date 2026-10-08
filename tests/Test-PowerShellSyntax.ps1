@@ -20,7 +20,7 @@ foreach ($scriptFile in $scripts) {
     }
 }
 
-$bomFiles = @($scripts) + @(Get-Item -LiteralPath (Join-Path $projectRoot 'ui\MainWindow.xaml'))
+$bomFiles = @($scripts) + @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'ui') -Filter '*.xaml' -File)
 foreach ($file in $bomFiles) {
     $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
     if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
