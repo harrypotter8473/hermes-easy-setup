@@ -583,8 +583,14 @@ try {
             $hostileEnvironmentPrevious[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
             [Environment]::SetEnvironmentVariable($name, (Join-Path $testRootFull ("hostile-$name")), [EnvironmentVariableTarget]::Process)
         }
-        $isolationProbeCommand = '$names=@("NODE_OPTIONS","NODE_PATH","PYTHONPATH","PYTHONHOME","VIRTUAL_ENV","UV_PROJECT","UV_PROJECT_ENVIRONMENT","UV_PYTHON","CONDA_PREFIX","CONDA_DEFAULT_ENV","PIPENV_ACTIVE","POETRY_ACTIVE","BASH_ENV","ENV","NPM_CONFIG_SCRIPT_SHELL");if(@($names|Where-Object{Test-Path "Env:$_"}).Count -eq 0 -and $env:GIT_SSH_COMMAND -eq $null){[Console]::Out.WriteLine("isolated")}else{[Console]::Out.WriteLine("inherited")}'
-        $isolationProbe = Invoke-HermesProcess -FilePath (Get-HermesPowerShellExecutable) -ArgumentList @('-NoLogo', '-NoProfile', '-Command', $isolationProbeCommand) -Environment $uvEnvironment -TimeoutSeconds 30
+        # Probe the actual child environment without PowerShell's first-run
+        # module discovery under a fresh synthetic user profile. ComSpec was
+        # pinned and signature-checked by New-HermesStageEnvironment.
+        $isolationProbeCommand = 'for %V in (NODE_OPTIONS NODE_PATH PYTHONPATH PYTHONHOME VIRTUAL_ENV UV_PROJECT UV_PROJECT_ENVIRONMENT UV_PYTHON CONDA_PREFIX CONDA_DEFAULT_ENV PIPENV_ACTIVE POETRY_ACTIVE BASH_ENV ENV NPM_CONFIG_SCRIPT_SHELL GIT_SSH_COMMAND) do @if defined %V exit /b 1'
+        $isolationProbeCommand = '(' + $isolationProbeCommand + ') & echo isolated'
+        $inheritedProbe = Invoke-HermesProcess -FilePath ([string]$uvEnvironment['ComSpec']) -ArgumentList @('/d', '/c', $isolationProbeCommand) -TimeoutSeconds 30
+        Assert-True ($inheritedProbe.ExitCode -eq 1 -and -not $inheritedProbe.TimedOut) 'environment probe detects inherited hostile variables'
+        $isolationProbe = Invoke-HermesProcess -FilePath ([string]$uvEnvironment['ComSpec']) -ArgumentList @('/d', '/c', $isolationProbeCommand) -Environment $uvEnvironment -TimeoutSeconds 30
         Assert-True ($isolationProbe.ExitCode -eq 0 -and $isolationProbe.StdOut.Trim() -ceq 'isolated') 'replacement environment blocks inherited Node, Python, shell, npm, and Git injection variables'
     } finally {
         foreach ($name in $hostileEnvironmentNames) {
