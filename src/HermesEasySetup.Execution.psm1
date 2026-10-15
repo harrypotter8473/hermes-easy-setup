@@ -53,10 +53,17 @@ function Get-HermesAuthenticodeSignature {
 
     $windowsDirectory = Get-HermesExecutionWindowsDirectory
     $moduleManifest = [System.IO.Path]::GetFullPath((Join-Path $windowsDirectory 'System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'))
+    $moduleRoot = $windowsDirectory
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        # Load the selected runtime's native cmdlets, not WinPS compatibility
+        # proxies, and never resolve the security module through PSModulePath.
+        $moduleRoot = [System.IO.Path]::GetFullPath($PSHOME)
+        $moduleManifest = Join-Path $moduleRoot 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1'
+    }
     if (-not (Test-Path -LiteralPath $moduleManifest -PathType Leaf)) {
         throw "The trusted Microsoft.PowerShell.Security module was not found: $moduleManifest"
     }
-    Assert-HermesExecutionPathIsNotReparsePoint -LiteralPath $moduleManifest -StopAt $windowsDirectory
+    Assert-HermesExecutionPathIsNotReparsePoint -LiteralPath $moduleManifest -StopAt $moduleRoot
 
     Import-Module -Name $moduleManifest -Force -Global -ErrorAction Stop
     $command = Get-Command -Name 'Microsoft.PowerShell.Security\Get-AuthenticodeSignature' -CommandType Cmdlet -ErrorAction Stop
