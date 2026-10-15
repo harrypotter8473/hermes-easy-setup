@@ -210,7 +210,7 @@ try {
                 if ($JsonEvents) {
                     & $eventCallback ([pscustomobject]@{
                         type = 'complete'; state = $(if ($result.Succeeded) { 'succeeded' } else { 'failed' })
-                        percent = 100; message = $(if ($result.Succeeded) { '네 연구 에이전트의 프로필과 Gateway 연결을 확인했습니다.' } else { '일부 연구 에이전트를 구성하지 못했습니다. 성공한 프로필은 보존했습니다.' })
+                        percent = 100; message = $(if ($result.Succeeded -and $result.ExecutionReady) { '실제 네 역할 분업·검색·감사 테스트를 통과했습니다. 사용 준비 완료.' } else { '사용 준비 전입니다. 미완료 설정 또는 실제 분업 테스트 결과를 확인하세요. 기존 기록은 보존했습니다.' })
                         data = $result
                     })
                 } else { Write-ResultObject $result }

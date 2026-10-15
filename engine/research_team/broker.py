@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,9 +26,11 @@ import urllib.request
 sys.dont_write_bytecode = True
 if __package__:
     from .policy import PolicyEngine, PolicyHold
+    from .workflow import AutomaticReportWorkflow
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from policy import PolicyEngine, PolicyHold
+    from workflow import AutomaticReportWorkflow
 
 ROLES = ("manager", "researcher", "analyst", "auditor")
 WORKER_ROLES = ("researcher", "analyst", "auditor")
@@ -43,6 +46,8 @@ _MESSAGING_POLICY = {
 PROTOCOL = """Return one JSON object only: {"message": "concise Korean status", "actions": [...]}.
 Available mediated actions (only those in your allowed tools may be requested):
 read_text: {"tool":"read_text","path":"absolute allowed path"}
+search_web (researcher only): {"tool":"search_web","query":"query","max_results":5}
+read_web (researcher only): {"tool":"read_web","url":"exact search result URL"}
 write_artifact: {"tool":"write_artifact","name":"logical name","scope":"scope","content":"full text"}
 dispatch (manager only): {"tool":"dispatch","role":"researcher|analyst|auditor|manager","scope":"scope","instructions":"objective, input refs, output, acceptance criteria","phase":"prepare|main|audit","dependencies":[artifact refs],"audit_stage":"intermediate|final for auditor only"}
 audit (auditor only): {"tool":"audit","artifact_ref":{...exact given ref...},"stage":"intermediate|final","scope":"scope","verdict":"pass|reject|unverifiable","notes":"criteria, evidence, issues, recheck method"}
@@ -150,14 +155,52 @@ class Mattermost:
         except Exception:
             raise RuntimeError("MattermostConnectionFailed") from None
 
-    def post(self, role, root_id, message):
+    def upload_report(self, filename, content):
+        if not re.fullmatch(r"research-report-req_[a-f0-9]{32}\.docx", filename) or not isinstance(content, bytes) or len(content) > 2_000_000:
+            raise ValueError("ReportUploadRejected")
+        boundary = "hermes" + hashlib.sha256(content).hexdigest()
+        channel = require_mattermost_id(self.service["channel_id"], "MattermostChannelID")
+        token = self.service["bots"]["manager"]["token"]
+        if not re.fullmatch("[a-z0-9]{26}", token):
+            raise ValueError("BotTokenRejected")
+        body = ("--" + boundary + '\r\nContent-Disposition: form-data; name="channel_id"\r\n\r\n' + channel + "\r\n--" + boundary + '\r\nContent-Disposition: form-data; name="files"; filename="' + filename + '"\r\nContent-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document\r\n\r\n').encode('ascii') + content + ("\r\n--" + boundary + "--\r\n").encode('ascii')
+        request = urllib.request.Request(self.base + '/files', data=body, headers={
+            'Authorization': 'Bearer ' + token, 'Content-Type': 'multipart/form-data; boundary=' + boundary})
+        try:
+            with self.opener.open(request, timeout=30) as response:
+                result = json.loads(response.read(65537))
+        except Exception:
+            raise RuntimeError("ReportUploadUncertain") from None
+        files = result.get('file_infos', [])
+        if len(files) != 1 or files[0].get('name') != filename or files[0].get('size') != len(content) or files[0].get('user_id') != self.service['bots']['manager']['user_id']:
+            raise RuntimeError("ReportUploadBindingRejected")
+        return require_mattermost_id(files[0].get('id'), 'MattermostFileID')
+
+    def verify_report(self, file_id, digest):
+        require_mattermost_id(file_id, 'MattermostFileID')
+        token = self.service['bots']['manager']['token']
+        request = urllib.request.Request(self.base + '/files/' + file_id, headers={'Authorization': 'Bearer ' + token})
+        try:
+            with self.opener.open(request, timeout=30) as response:
+                content = response.read(2_000_001)
+        except Exception:
+            raise RuntimeError('ReportDownloadVerificationFailed') from None
+        if len(content) > 2_000_000 or hashlib.sha256(content).hexdigest() != digest:
+            raise RuntimeError('ReportDownloadHashMismatch')
+        return True
+
+    def post(self, role, root_id, message, *, file_ids=None):
         # This is the sole outbound messaging surface; model content cannot set
         # channel, recipients, attachments or URL. All traffic stays loopback.
         require_mattermost_id(root_id, "MattermostThreadRoot")
         if not isinstance(message, str) or not message or len(message) > 12000:
             raise ValueError("MattermostMessageRejected")
-        result = self.api(role, "/posts", {"channel_id": self.service["channel_id"],
-                  "root_id": root_id, "message": message})
+        body = {"channel_id": self.service["channel_id"], "root_id": root_id, "message": message}
+        if file_ids is not None:
+            if role != 'manager' or not isinstance(file_ids, list) or len(file_ids) != 1:
+                raise ValueError('ReportAttachmentRejected')
+            body['file_ids'] = [require_mattermost_id(file_ids[0], 'MattermostFileID')]
+        result = self.api(role, "/posts", body)
         if (not isinstance(result, dict) or
                 result.get("channel_id") != self.service["channel_id"]):
             raise RuntimeError("MattermostPostBindingRejected")
@@ -165,7 +208,18 @@ class Mattermost:
         response_root = result.get("root_id")
         if response_root != root_id:
             raise RuntimeError("MattermostThreadBindingRejected")
+        if file_ids is not None and result.get('file_ids') != file_ids:
+            raise RuntimeError('ReportPostAttachmentBindingRejected')
         return post_id
+
+    def create_test_thread(self, message):
+        result = self.api("manager", "/posts", {"channel_id": self.service["channel_id"],
+                          "message": message})
+        if (not isinstance(result, dict) or result.get("channel_id") != self.service["channel_id"] or
+                result.get("user_id") != self.service["bots"]["manager"]["user_id"] or result.get("root_id")):
+            raise RuntimeError("LiveTestThreadBindingRejected")
+        require_mattermost_id(result.get("id"), "MattermostPostID")
+        return result
 
 
 class Broker:
@@ -209,6 +263,8 @@ class Broker:
         if not self.db.execute("SELECT 1 FROM meta WHERE key='since'").fetchone():
             self.db.execute("INSERT INTO meta VALUES('since',?)", (str(int(time.time()*1000)),))
         self.db.commit()
+        self.workflow = AutomaticReportWorkflow(self)
+        self.production_runtime = client is None and worker is None and preparer is None
 
     @staticmethod
     def _require_request_id(value):
@@ -312,7 +368,7 @@ class Broker:
             post_id=require_mattermost_id(post.get("id"), "MattermostPostID"))
 
     def _send_envelope(self, request_id, task_id, source_role, target_role,
-                       kind, post_id, message, source_task_id=None):
+                       kind, post_id, message, source_task_id=None, file_ids=None):
         if source_role not in ROLES:
             raise ValueError("MessageEnvelopeSourceRejected")
         thread_root_id = self._thread_root(post_id)
@@ -326,7 +382,8 @@ class Broker:
             kind, message, "sending", source_task_id=source_task_id)
         # Persist-before-send makes a crash an explicit uncertain delivery.
         # Such an envelope is never accepted as authority on restart.
-        actual_post_id = self.client.post(source_role, thread_root_id, message)
+        actual_post_id = (self.client.post(source_role, thread_root_id, message, file_ids=file_ids)
+                          if file_ids else self.client.post(source_role, thread_root_id, message))
         if actual_post_id is not None:
             actual_post_id = require_mattermost_id(actual_post_id, "MattermostPostID")
         cursor = self.db.execute(
@@ -446,9 +503,16 @@ class Broker:
             process.kill()
             process.communicate()
             raise RuntimeError("ModelWallClockLimitExceeded") from None
-        if process.returncode or len(output.encode("utf-8")) > 2097152:
+        if len(output.encode("utf-8")) > 2097152:
             raise RuntimeError("HermesWorkerFailed")
         result = json.loads(output)
+        if process.returncode:
+            code = result.get("error", {}).get("code") if isinstance(result.get("error"), dict) else None
+            if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,80}", code):
+                error = RuntimeError("HermesWorker_" + code)
+                error.diagnostics = safe_worker_diagnostics(result["error"].get("diagnostics"))
+                raise error
+            raise RuntimeError("HermesWorkerFailed")
         if result.get("ok") is not True or result.get("native_tool_count") != 0:
             raise RuntimeError("HermesWorkerRejected")
         return result
@@ -464,6 +528,8 @@ class Broker:
             "prompt_sha256": config["prompt_sha256"], "model": config["model"],
             "provider": config["provider"], "max_output_tokens": config["limits"]["max_output_tokens"],
             "timeout_seconds": config["limits"]["per_call_timeout_seconds"], "input": input_object}
+        if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > 500000:
+            raise PolicyHold("AutomaticContextCapacityExceeded")
         # Preparation is offline and bounded too. It consumes an attempt/time,
         # but no model tokens. Unknown/crashed reservations are not refunded.
         preparation = self.policy.reserve_budget(request_id, role, input_text="", max_output_tokens=0,
@@ -490,6 +556,10 @@ class Broker:
             result = self.worker(payload, config["limits"]["per_call_timeout_seconds"], prepared["prepared_input_sha256"])
             self.event(request_id, role, "model", "returned", {"output_tokens": result.get("output_tokens"),
                 "usage_note": "provider-reported if present; null means unavailable", "elapsed_seconds": time.monotonic() - started})
+        except Exception as error:
+            self.event(request_id, role, "model", "failed", {"error_code": public_failure(error),
+                "diagnostics": safe_worker_diagnostics(getattr(error, "diagnostics", None))})
+            raise
         finally:
             # Reservations are never refunded on error/crash/unknown usage.
             self.policy.consume_budget(reservation, actual_output_tokens=None,
@@ -500,17 +570,51 @@ class Broker:
         answer = json.loads(text)
         if set(answer) != {"message", "actions"} or not isinstance(answer["message"], str) or not isinstance(answer["actions"], list):
             raise ValueError("ModelActionEnvelopeRejected")
+        self.restore_automatic_scope(answer, context)
         return answer
+
+    @staticmethod
+    def restore_automatic_scope(answer, context):
+        automatic = context.get("automatic_workflow")
+        if not isinstance(automatic, dict):
+            return
+        scope = automatic.get("scope")
+        if not isinstance(scope, str) or not scope.strip() or len(scope) > 256:
+            raise ValueError("AutomaticScopeBindingRejected")
+        wire_scope = "scope_" + hashlib.sha256(scope.encode("utf-8")).hexdigest()
+        for action in answer["actions"]:
+            if not isinstance(action, dict):
+                raise ValueError("ModelActionEnvelopeRejected")
+            if "scope" in action:
+                if action["scope"] != wire_scope:
+                    raise ValueError("ModelActionScopeBindingRejected")
+                action["scope"] = scope
+            ref = action.get("artifact_ref")
+            if isinstance(ref, dict) and "scope" in ref:
+                if ref["scope"] != wire_scope:
+                    raise ValueError("ModelActionScopeBindingRejected")
+                ref["scope"] = scope
+        # No permissions are granted here. Exact role, task, version, hash and
+        # scope are still verified by workflow/policy before any action executes.
 
     def action(self, request_id, task_id, role, action):
         self.policy = PolicyEngine(self.root / "policy.json", self.root / "policy.sqlite")
         if not isinstance(action, dict) or action.get("tool") not in (
-                "read_text", "write_artifact", "dispatch", "audit", "complete"):
+                "read_text", "write_artifact", "dispatch", "audit", "complete", "search_web", "read_web"):
             raise ValueError("UnsupportedMediatedAction")
         config = self.policy.read_config()["roles"][role]
         if action["tool"] not in config["tools"]:
             raise PermissionError("RoleToolDenied")
         tool = action["tool"]
+        if tool in ("search_web", "read_web"):
+            if __package__:
+                from .web_tools import WebTools
+            else:
+                from web_tools import WebTools
+            adapter = WebTools(self.policy)
+            if tool == "search_web":
+                return adapter.search(request_id, task_id, role, action["query"], action.get("max_results"))
+            return adapter.read(request_id, task_id, role, action["url"])
         if tool == "read_text":
             path = self.policy.authorize_read(role, action["path"])
             path = Path(path)
@@ -565,6 +669,27 @@ class Broker:
             raise PermissionError("OnlyManagerCanComplete")
         decision = plain(self.policy.gate(request_id, stage="final", scope=action["scope"]))
         return {"completion_gate": decision}
+
+    def task_context(self, post_id, request_id, task):
+        """Construct request-isolated model inputs after envelope verification."""
+        role = task["role"]
+        delivery = self._validate_task_delivery(post_id, request_id, task)
+        context = {"request_id": request_id, "task": self._visible_task(task, role),
+                   "agent_display_name": self.service["bots"][role]["display_name"],
+                   "role_policy": self.policy.read_config()["roles"][role],
+                   "budget": self.policy.get_budget(request_id, role),
+                   "verified_messages": self._message_context(request_id, role, delivery),
+                   "available_artifact_refs": self._visible_artifact_refs(request_id, task, role)}
+        if role == "manager":
+            context["request"] = self.policy.get_request(request_id)
+        if role in ("manager", "auditor") and "read_text" in self.policy.read_config()["roles"][role]["tools"]:
+            context["previous_audit_records"] = self.policy.list_audit_records(request_id, role=role)
+        context["input_artifacts"] = [{"ref": ref,
+            "untrusted_content": self.policy.read_artifact(request_id, task["task_id"], role=role,
+                artifact_ref=ref).decode("utf-8")} for ref in task.get("dependencies", [])]
+        if role == "auditor":
+            context["prior_artifact_versions"] = self.policy.audit_history_inputs(request_id, task["task_id"])
+        return context
 
     def execute(self, post_id, request_id, scope, queue):
         """Serial dispatch prevents overlapping writes; real engine owns authority.
@@ -696,14 +821,14 @@ class Broker:
         self.db.commit()
 
     def reply(self, role, post_id, message, *, request_id=None, task_id=None,
-              target_role="human", kind="bot_status", source_task_id=None):
+              target_role="human", kind="bot_status", source_task_id=None, file_ids=None):
         if request_id is None or task_id is None:
             # Non-model command acknowledgements have no task authority. They
             # are still root-bound, but cannot become a delivery envelope.
             return self.client.post(role, self._thread_root(post_id), message)
         return self._send_envelope(request_id, task_id, role, target_role,
                                    kind, post_id, message,
-                                   source_task_id=source_task_id)
+                                   source_task_id=source_task_id, file_ids=file_ids)
 
     def event(self, request_id, role, kind, state, detail):
         self.db.execute("INSERT INTO events(request_id,role,kind,state,detail,at) VALUES(?,?,?,?,?,?)",
@@ -743,7 +868,10 @@ class Broker:
                 self.client.post("manager", incoming_root,
                     json.dumps({"request_id": command[2], "state": row[1], "gate": result}, ensure_ascii=False))
             elif row[1] == "held":
-                self.execute(row[0], command[2], saved["scope"], saved["queue"])
+                if self.workflow.load(command[2]):
+                    self.workflow.run(command[2])
+                else:
+                    self.execute(row[0], command[2], saved["scope"], saved["queue"])
             elif row[1] == "interrupted_requires_review":
                 self.client.post("manager", incoming_root,
                     "이 요청은 실행 중 중단되어 마지막 처리의 중복 여부를 확인해야 합니다. 산출물·감사 기록·예약 예산을 보존했으며 자동 재실행하지 않습니다.")
@@ -761,41 +889,61 @@ class Broker:
             self.client.post("manager", incoming_root,
                 "지정한 ID·버전·해시에 대한 연구자 확인을 기록했습니다. 자동으로 다른 버전을 승인하지 않습니다.")
             return
-        match = re.fullmatch(r"/research (S[123])\s+([\s\S]+)", message)
-        if match:
-            self.client.post("manager", incoming_root,
-                '필수 범위·입력 참조·산출물을 지정해 주세요. 모델은 아직 호출하지 않았습니다. 형식: /research {"scenario":"S1","scope":"범위","input_refs":[],"outputs":["필요한 산출물"]}')
+        username = self.service["bots"]["manager"]["username"]
+        mention = re.fullmatch(r"@" + re.escape(username) + r"\s+([\s\S]{1,8000})", message)
+        if mention:
+            objective = mention[1].strip()
+            specification = {"scenario": "S1", "scope": objective[:256], "input_refs": [], "outputs": ["report"]}
+        elif message.startswith("/research {"):
+            specification = json.loads(message[len("/research "):])
+            if set(specification) != {"scenario", "scope", "input_refs", "outputs"}:
+                raise ValueError("ResearchSpecificationFieldsRequired")
+            objective = specification["scope"]
+        else:
             return
-        if not message.startswith("/research {"):
-            return
-        specification = json.loads(message[len("/research "):])
-        if set(specification) != {"scenario", "scope", "input_refs", "outputs"}:
-            raise ValueError("ResearchSpecificationFieldsRequired")
+        return self.start_automatic_request(post, specification, objective)
+
+    def start_automatic_request(self, post, specification, objective, *, installation_user=None):
+        """Only ingress above and the explicit installation test call this API."""
         if self.db.execute("SELECT 1 FROM posts WHERE id=?", (post["id"],)).fetchone():
             return
         self.policy.require_ready()
+        incoming_root = self._incoming_thread_root(post)
         scope = specification["scope"]
-        request = self.policy.create_request(specification["scenario"], user_id=post["user_id"], scope=scope,
+        request = self.policy.create_request(specification["scenario"], user_id=installation_user or post["user_id"], scope=scope,
             input_refs=specification["input_refs"], outputs=specification["outputs"],
             metadata={"mattermost_post_id": post["id"], "engine_version": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                      "automatic_workflow": 1, "installation_test": installation_user is not None,
                       "persona_versions": {role: self.policy.read_config()["roles"][role]["prompt_sha256"] for role in ROLES}})
         task = self.policy.assign_task(request, actor_role="manager", target_role="manager",
             scope=scope, instructions=scope, phase="prepare", dependencies=[])
         queue = [{"task_id": task, "role": "manager", "scope": scope, "instructions": scope, "phase": "prepare"}]
         self.save(post["id"], "running", request, scope, queue, root_id=incoming_root)
         try:
-            queue[0]["_delivery_envelope_id"] = self._record_human_source(
-                post, request, task, incoming_root)
+            if installation_user is None:
+                queue[0]["_delivery_envelope_id"] = self._record_human_source(post, request, task, incoming_root)
+            else:
+                if not self.production_runtime or post.get("user_id") != self.service["bots"]["manager"]["user_id"]:
+                    raise ValueError("LiveTestSourceRejected")
+                queue[0]["_delivery_envelope_id"] = self._send_envelope(request, task, "manager", "manager",
+                    "task", post["id"], "@" + self.service["bots"]["manager"]["username"] +
+                    " 설치 중 사용자가 승인한 실제 네 역할 분업 검증을 시작합니다.", source_task_id=task)
             self.save(post["id"], "running", request, scope, queue)
-            self.execute(post["id"], request, scope, queue)
+            self.workflow.start(post["id"], request, scope, objective, queue[0])
         except Exception as error:
             # Class-only public failure messages avoid private file/model text.
             self.db.execute("UPDATE posts SET state='stopped' WHERE id=?", (post["id"],))
             self.db.commit()
             self.event(request, "manager", "request", "stopped", {"reason": type(error).__name__})
+            state = self.workflow.load(request)
+            if state:
+                state["status"] = "stopped"
+                state["last_error"] = public_failure(error)
+                self.workflow.save(state)
             self.reply("manager", post["id"],
-                "실행을 중단했습니다. 자동 통과·무제한 재시도는 하지 않습니다. " + type(error).__name__ + " / " + request,
+                "실행을 중단했습니다. 자동 통과·무제한 재시도는 하지 않습니다. " + public_failure(error) + " / " + request,
                 request_id=request, task_id=task, target_role="human", kind="bot_status")
+        return request
 
     def find_request(self, request_id):
         for row in self.db.execute("SELECT id,state,payload FROM posts"):
@@ -803,20 +951,72 @@ class Broker:
                 return row
         return None
 
+    def self_test(self, user_id):
+        """Live only: four real model roles, HTTPS tools and Mattermost evidence.
+
+        Offline fixtures never produce install readiness. The thread is clearly
+        labelled as an installer-authorized request, not a forged human post.
+        """
+        if not self.production_runtime or not isinstance(self.client, Mattermost):
+            raise ValueError("LiveTestRequiresProductionRuntime")
+        result = {"ready": False, "live": True, "roles_verified": [], "audits_verified": False,
+                  "search_verified": False, "read_verified": False, "pending_reasons": []}
+        write_live_evidence(self.root, result)
+        try:
+            status = check(self.root, verify_service=True)
+            if not status["configuration_ready"]:
+                raise ValueError("LiveTestConfigurationIncomplete")
+            if user_id not in self.policy.read_config()["human"]["allowed_user_ids"]:
+                raise PermissionError("LiveTestUserNotAllowed")
+            for role in ROLES:
+                identity = self.client.api(role, "/users/me")
+                bot = self.service["bots"][role]
+                if identity.get("id") != bot["user_id"] or identity.get("username") != bot["username"]:
+                    raise ValueError("LiveTestBotIdentityChanged")
+            domains = self.policy.read_config()["roles"]["researcher"]["external_domains"]
+            if not domains:
+                raise ValueError("LiveTestSearchDomainsMissing")
+            source_domain = "arxiv.org" if "*" in domains else next((domain for domain in domains if domain != "html.duckduckgo.com"), domains[0])
+            objective = (source_domain + "에서 언어 모델의 사실 오류에 관한 공개 자료 한 편을 검색하고, 초록 또는 소개 페이지를 읽어 근거 URL이 있는 짧은 요약 보고서를 작성해 주세요. 초록만 읽었으면 논문 전체를 검토했다고 쓰지 마세요.\n\n"
+                "1. 조사 담당은 실제 검색·원문 읽기를 실행하세요. 첫 검색어는 site:" + source_domain + " hallucination 으로 짧게 시작하세요.\n"
+                "2. 분석 담당은 핵심 내용을 분석하고, 감사 담당은 원문과 결과를 검증하세요.")
+            post = self.client.create_test_thread("연구팀 설치 실제 분업 테스트: " + objective)
+            result["thread_root_id"] = post["id"]
+            request_id = self.start_automatic_request(post,
+                {"scenario": "S1", "scope": objective[:256], "input_refs": [], "outputs": ["report"]},
+                objective, installation_user=user_id)
+            result["request_id"] = request_id
+            state = self.workflow.load(request_id)
+            result.update(workflow_evidence(self, state))
+            result.update(runtime_binding(self.root))
+            result["tested_at"] = time.time()
+            result["ready"] = (state["status"] == "reviewed" and result["roles_verified"] == list(ROLES) and
+                               result["audits_verified"] and result["search_verified"] and result["read_verified"] and
+                               result["messages_verified"] and result["report_verified"])
+            if not result["ready"]:
+                result["pending_reasons"] = [state.get("last_error") or "Four-role live workflow did not complete with current tool, audit and thread evidence"]
+        except Exception as error:
+            result["pending_reasons"] = [type(error).__name__ + ": live workflow validation incomplete"]
+        write_live_evidence(self.root, result)
+        return result
+
     def serve(self):
         while True:
             status = check(self.root, verify_service=True)
-            status.update({"pid": os.getpid(), "updated_at": time.time()})
+            maintenance = (self.root / "maintenance.json").exists()
+            status.update({"pid": os.getpid(), "updated_at": time.time(), "maintenance": maintenance, "active": False})
             temporary = self.root / "broker-status.new"
             temporary.write_text(json.dumps(status, ensure_ascii=False), encoding="utf-8")
             os.replace(temporary, self.root / "broker-status.json")
-            if status["ready"]:
+            if status["ready"] and not maintenance:
                 try:
                     self.policy = PolicyEngine(self.root / "policy.json", self.root / "policy.sqlite")
                     since = self.db.execute("SELECT value FROM meta WHERE key='since'").fetchone()[0]
                     response = self.client.api("manager", "/channels/" + self.service["channel_id"] + "/posts?since=" + since)
                     posts = sorted(response.get("posts", {}).values(), key=lambda p: (p.get("create_at", 0), p.get("id", "")))
                     for post in posts:
+                        if (self.root / "maintenance.json").exists():
+                            break
                         try:
                             self.handle_post(post)
                         except Exception:
@@ -880,6 +1080,139 @@ def validate_messaging(root):
         return ["Messaging policy binding could not be verified"]
 
 
+def runtime_binding(root):
+    root = Path(root)
+    config = read_json(root / "policy.json")
+    return {"policy_sha256": hashlib.sha256((root / "policy.json").read_bytes()).hexdigest(),
+            "service_sha256": hashlib.sha256((root / "private.json").read_bytes()).hexdigest(),
+            "engine_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in sorted(Path(__file__).parent.glob("*.py"))},
+            "persona_sha256": {role: hashlib.sha256(assert_regular_path(config["roles"][role]["prompt_path"]).read_bytes()).hexdigest()
+                for role in ROLES}}
+
+
+def public_failure(error):
+    # Worker codes are locally defined identifiers; web adapter messages contain
+    # public network reasons only. Never echo arbitrary provider/file errors.
+    message = str(error)
+    if type(error).__name__ == "WebToolError":
+        return "WebToolError: " + message[:240]
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,100}", message):
+        return message
+    return type(error).__name__
+
+
+def safe_worker_diagnostics(value):
+    if not isinstance(value, dict):
+        return {}
+    safe = {}
+    enums = {"response_status": {"completed", "incomplete", "failed", "cancelled", "queued", "in_progress", "unknown"},
+             "incomplete_reason": {"max_output_tokens", "content_filter", "other", None},
+             "finish_reason": {"stop", "length", "incomplete", "content_filter", "tool_calls", "unknown"}}
+    for name, permitted in enums.items():
+        if name in value and isinstance(value.get(name), (str, type(None))) and value.get(name) in permitted:
+            safe[name] = value[name]
+    for name in ("output_characters", "output_bytes", "json_error_line", "json_error_column", "model_call_count", "http_status"):
+        if type(value.get(name)) is int and 0 <= value[name] <= 10000000:
+            safe[name] = value[name]
+    for name in ("fenced", "starts_with_object", "refusal"):
+        if type(value.get(name)) is bool:
+            safe[name] = value[name]
+    digest = value.get("output_sha256")
+    if isinstance(digest, str) and re.fullmatch("[a-f0-9]{64}", digest):
+        safe["output_sha256"] = digest
+    return safe
+
+
+def write_live_evidence(root, result):
+    temporary = assert_regular_path(Path(root) / "live-test.new")
+    destination = assert_regular_path(Path(root) / "live-test.json")
+    temporary.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, destination)
+
+
+def workflow_evidence(broker, state):
+    if not isinstance(state, dict):
+        raise ValueError("WorkflowEvidenceMissing")
+    request_id = state["request_id"]
+    roles = {row[0] for row in broker.db.execute(
+        "SELECT DISTINCT role FROM events WHERE request_id=? AND kind='model' AND state='returned'", (request_id,))}
+    tools = {"search_web": [], "read_web": []}
+    stored = {item["id"]: item for item in broker.policy.list_web_evidence(request_id)}
+    for row in broker.db.execute("SELECT detail FROM events WHERE request_id=? AND kind='tool' AND state='returned'", (request_id,)):
+        detail = json.loads(row[0])
+        tool, result = detail.get("tool"), detail.get("result")
+        if tool in tools and isinstance(result, dict) and result.get("ok") is True and result.get("evidence_id"):
+            evidence = stored.get(result["evidence_id"])
+            if evidence and evidence["tool"] == tool and evidence["role"] == "researcher" and evidence["task_id"] == result.get("task_id"):
+                encoded = json.dumps(evidence["result"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                if hashlib.sha256(encoded.encode("utf-8")).hexdigest() == evidence["result_sha256"]:
+                    tools[tool].append(result["evidence_id"])
+    envelopes = broker.db.execute("SELECT state,post_id,thread_root_id FROM message_envelopes WHERE request_id=?", (request_id,)).fetchall()
+    root = broker._thread_root(state["post_id"])
+    delivery = state.get('report_delivery', {})
+    report_envelope = broker.db.execute('SELECT state,post_id,thread_root_id,source_role FROM message_envelopes WHERE id=?',
+                                       (delivery.get('envelope_id', ''),)).fetchone()
+    report_verified = (delivery.get('state') == 'delivered' and delivery.get('download_verified') is True and
+        delivery.get('artifact_ref') == state.get('artifacts', {}).get('manager') and
+        isinstance(delivery.get('file_id'), str) and bool(_MM_ID.fullmatch(delivery['file_id'])) and
+        isinstance(delivery.get('sha256'), str) and bool(re.fullmatch('[a-f0-9]{64}', delivery['sha256'])) and
+        report_envelope is not None and report_envelope[0] == 'delivered' and report_envelope[2] == root and report_envelope[3] == 'manager')
+    return {"roles_verified": [role for role in ROLES if role in roles],
+            "report_verified": bool(report_verified),
+            "audits_verified": broker.policy.reviewed_report_gate(request_id, scope=state["scope"]).status == "pass",
+            "search_verified": bool(tools["search_web"]) and set(tools["search_web"]) == set(state["search_evidence"]),
+            "read_verified": bool(tools["read_web"]) and set(tools["read_web"]) == set(state["read_evidence"]),
+            "messages_verified": bool(envelopes) and all(row[0] == "delivered" and isinstance(row[1], str) and
+                _MM_ID.fullmatch(row[1]) and row[2] == root for row in envelopes)}
+
+
+def check_live_evidence(root):
+    """Bind readiness to this exact installation and persisted live execution."""
+    try:
+        saved = read_json(Path(root) / "live-test.json")
+        if (saved.get("ready") is not True or saved.get("live") is not True or
+                saved.get("roles_verified") != list(ROLES) or
+                any(saved.get(key) is not True for key in ("audits_verified", "search_verified", "read_verified", "messages_verified", "report_verified"))):
+            return False
+        if any(saved.get(key) != value for key, value in runtime_binding(root).items()):
+            return False
+        # Read-only validation must not construct Broker, which would mark an
+        # executing request as interrupted. Inspect its durable records directly.
+        path = assert_regular_path(Path(root) / "broker.sqlite")
+        connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        try:
+            row = connection.execute("SELECT payload FROM workflows WHERE request_id=?", (saved["request_id"],)).fetchone()
+            if row is None:
+                return False
+            state = json.loads(row[0])
+            if state.get("status") != "reviewed" or state.get("stage") != "reviewed":
+                return False
+            roles = {row[0] for row in connection.execute("SELECT DISTINCT role FROM events WHERE request_id=? AND kind='model' AND state='returned'", (saved["request_id"],))}
+            if roles != set(ROLES):
+                return False
+            policy = PolicyEngine(Path(root) / "policy.json", Path(root) / "policy.sqlite")
+            request = policy.get_request(saved["request_id"])
+            post = connection.execute("SELECT state,payload FROM posts WHERE id=?", (state["post_id"],)).fetchone()
+            if post is None or post[0] != "reviewed":
+                return False
+            thread_root = json.loads(post[1]).get("thread_root_id")
+            if thread_root != saved["thread_root_id"]:
+                return False
+            evidence = workflow_evidence(SimpleNamespace(policy=policy, db=connection,
+                _thread_root=lambda _: thread_root), state)
+            if evidence["roles_verified"] != list(ROLES) or any(evidence[key] is not True for key in
+                    ("audits_verified", "search_verified", "read_verified", "messages_verified", "report_verified")):
+                return False
+            return (request["metadata"].get("installation_test") is True and
+                    request["metadata"].get("mattermost_post_id") == saved["thread_root_id"] and
+                    policy.reviewed_report_gate(saved["request_id"], scope=state["scope"]).status == "pass")
+        finally:
+            connection.close()
+    except Exception:
+        return False
+
+
 def check(root, config_path=None, verify_service=False):
     root = assert_regular_path(root)
     engine = PolicyEngine(config_path or root / "policy.json", root / "policy.sqlite")
@@ -905,10 +1238,14 @@ def check(root, config_path=None, verify_service=False):
             verified &= hashlib.sha256(path.read_bytes()).hexdigest() == item["prompt_sha256"].lower()
         except Exception:
             verified = False
-    return {"ready": bool(status.get("ready")) and verified and not service_errors and
-                    (messaging_verified or config_path is not None),
+    configuration_ready = bool(status.get("ready")) and verified and not service_errors and (messaging_verified or config_path is not None)
+    live_verified = check_live_evidence(root) if config_path is None else False
+    live_pending = (["Live four-role workflow test has not passed for this installation"]
+                    if config_path is None and not live_verified else [])
+    return {"ready": configuration_ready and (live_verified or config_path is not None),
+            "configuration_ready": configuration_ready, "live_test_verified": live_verified,
             "prompts_verified": bool(verified), "messaging_verified": bool(messaging_verified),
-            "pending_reasons": list(status.get("pending_reasons", [])) + list(status.get("errors", [])) + service_errors,
+            "pending_reasons": list(status.get("pending_reasons", [])) + list(status.get("errors", [])) + service_errors + live_pending,
             "errors": list(status.get("errors", [])) + service_errors,
             "native_tools_enabled": False}
 
@@ -934,12 +1271,24 @@ def service_lock(root):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("check", "serve"))
+    parser.add_argument("command", choices=("check", "serve", "self-test"))
     parser.add_argument("--root", required=True)
     parser.add_argument("--config")
+    parser.add_argument("--user-id")
     args = parser.parse_args()
     if args.command == "check":
         print(json.dumps(check(Path(args.root), args.config, verify_service=not bool(args.config)), ensure_ascii=True))
+    elif args.command == "self-test":
+        with service_lock(args.root):
+            broker = Broker(Path(args.root))
+            try:
+                user = args.user_id or next(iter(broker.policy.read_config()["human"]["allowed_user_ids"]), "")
+                result = broker.self_test(user)
+                print(json.dumps(result, ensure_ascii=True))
+                if not result["ready"]:
+                    sys.exit(2)
+            finally:
+                broker.db.close()
     else:
         with service_lock(args.root):
             Broker(Path(args.root)).serve()

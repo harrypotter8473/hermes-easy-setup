@@ -7,22 +7,35 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from engine.research_team.broker import Broker
-from engine.research_team.policy import PolicyHold
+from engine.research_team.broker import Broker, check_live_evidence
+from engine.research_team.policy import PolicyEngine, PolicyHold
 
 
 class _OfflineMattermost:
     def __init__(self) -> None:
         self.posts: list[tuple[str, str, str]] = []
 
-    def post(self, role: str, root_id: str, message: str) -> None:
+    def post(self, role: str, root_id: str, message: str, *, file_ids=None) -> None:
         self.posts.append((role, root_id, message))
         return f"{len(self.posts):026d}"
+
+    def upload_report(self, filename, content):
+        self.report_bytes = content
+        return 'f' * 26
+
+    def verify_report(self, file_id, digest):
+        assert file_id == 'f' * 26
+        assert hashlib.sha256(self.report_bytes).hexdigest() == digest
+        return True
 
 
 class ResearchFlowTests(unittest.TestCase):
     def setUp(self) -> None:
+        sleeper = patch('engine.research_team.workflow.time.sleep')
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
         self.temporary = tempfile.TemporaryDirectory(prefix="hermes-research-flow-")
         self.root = Path(self.temporary.name).resolve()
         self.inputs = self.root.parent / f"{self.root.name}-inputs"
@@ -376,7 +389,9 @@ class ResearchFlowTests(unittest.TestCase):
         resumed_replies = self.client.posts[before:]
         self.assertGreaterEqual(len(resumed_replies), 2)
         self.assertEqual({root_post}, {root for _, root, _ in resumed_replies})
-        self.assertEqual(3, self.worker_calls)
+        # Each new request must leave manager planning and attempt its assigned
+        # researcher; resume continues that held researcher only.
+        self.assertEqual(14, self.worker_calls)  # 2 plans + 3 groups of 4 bounded attempts
 
     def test_manager_worker_round_trip_binds_mentions_envelopes_and_observation(self) -> None:
         captured = []
@@ -426,7 +441,7 @@ class ResearchFlowTests(unittest.TestCase):
         self.broker.worker = routed_worker
         post_id = "v" * 26
         thread_root = "w" * 26
-        self.broker.handle_post({
+        post = {
             "id": post_id,
             "root_id": thread_root,
             "user_id": "human-fixture",
@@ -437,7 +452,15 @@ class ResearchFlowTests(unittest.TestCase):
                 "input_refs": [],
                 "outputs": ["report"],
             }),
-        })
+        }
+        # Exercise the low-level dispatcher envelope boundary directly; public
+        # ingress now always uses the mandatory report pipeline tested below.
+        request_id, root_task = self.new_request()
+        task = {"task_id": root_task, "role": "manager", "scope": "flow-scope",
+                "instructions": "dispatch fixture", "phase": "prepare"}
+        self.broker.save(post_id, "running", request_id, "flow-scope", [task], root_id=thread_root)
+        task["_delivery_envelope_id"] = self.broker._record_human_source(post, request_id, root_task, thread_root)
+        self.broker.execute(post_id, request_id, "flow-scope", [task])
 
         self.assertEqual(
             ["manager", "researcher", "manager", "researcher", "manager"],
@@ -575,6 +598,158 @@ class ResearchFlowTests(unittest.TestCase):
             )
         finally:
             restarted.db.close()
+
+    def automatic_fixture(self, *, reject_once=False, skip_research_tools=False, malicious_manager=False):
+        config = json.loads((self.root / "policy.json").read_text(encoding="utf-8"))
+        config["web"] = {"provider": "duckduckgo_html", "allow_public_web": True,
+            "timeout_seconds": 10, "max_response_bytes": 100000, "max_text_chars": 1000,
+            "max_results": 5, "max_redirects": 2}
+        config["roles"]["researcher"]["tools"] = list(dict.fromkeys(config["roles"]["researcher"]["tools"] + ["search_web", "read_web"]))
+        config["roles"]["researcher"]["external_domains"] = ["*"]
+        for role in config["roles"].values():
+            role["limits"].update(attempts=80, tokens=2_000_000, seconds=600)
+        (self.root / "policy.json").write_text(json.dumps(config), encoding="utf-8")
+        self.broker.policy = PolicyEngine(self.root / "policy.json", self.root / "policy.sqlite")
+        captured, rejected = [], False
+        original_action = self.broker.action
+
+        def action(request_id, task_id, role, item):
+            if item["tool"] not in ("search_web", "read_web"):
+                return original_action(request_id, task_id, role, item)
+            result = {"ok": True, "tool": item["tool"], "request_id": request_id,
+                "task_id": task_id, "source_url": "https://example.org/source", "fetched_at": "fixture",
+                "response_sha256": "a" * 64}
+            if item["tool"] == "search_web":
+                result["results"] = [{"title": "Original", "url": "https://example.org/source", "snippet": "original"}]
+            else:
+                result.update(url="https://example.org/source", text="actual original source fixture",
+                              title="Original", text_sha256="b" * 64)
+            result["evidence_id"] = self.broker.policy.record_web_evidence(request_id, task_id, role, item["tool"], result)
+            return result
+
+        def worker(payload, timeout, expected_digest):
+            nonlocal rejected
+            captured.append(payload)
+            context, role = payload["input"]["context"], payload["role"]
+            state = context["automatic_workflow"]
+            scope, stage = state["output_scope_token"], state["stage"]
+            actions = []
+            if stage == "plan" and malicious_manager:
+                actions = [{"tool": "complete", "scope": scope}]
+            elif stage == "research":
+                results = state["stage_results"]
+                if not results and not skip_research_tools:
+                    actions = [{"tool": "search_web", "query": "original evidence"}]
+                elif len(results) == 1 and not skip_research_tools:
+                    actions = [{"tool": "read_web", "url": "https://example.org/source"}]
+                else:
+                    actions = [{"tool": "write_artifact", "name": "researcher", "scope": scope,
+                                "content": "research evidence https://example.org/source"}]
+            elif stage in ("analysis", "synthesis"):
+                actions = [{"tool": "write_artifact", "name": "report" if role == "manager" else "analyst",
+                            "scope": scope, "content": "reviewed " + role + " output"}]
+            elif role == "auditor":
+                for ref in context["task"]["dependencies"]:
+                    verdict = "pass"
+                    if reject_once and not rejected and ref["role"] == "researcher":
+                        rejected, verdict = True, "reject"
+                    actions.append({"tool": "audit", "artifact_ref": {**ref, "scope": scope}, "scope": scope,
+                        "stage": context["task"]["audit_stage"], "verdict": verdict,
+                        "notes": "Compare original source and correct missing attribution"})
+            return {"ok": True, "text": json.dumps({"message": stage + " @verified_analyst", "actions": actions}),
+                    "output_tokens": 10}
+
+        self.broker.action, self.broker.worker = action, worker
+        return captured
+
+    def natural_request(self, post_id="n" * 26):
+        return self.broker.handle_post({"id": post_id, "root_id": "r" * 26,
+            "user_id": "human-fixture", "channel_id": "c" * 26,
+            "message": "@verified_manager 원문 근거를 포함한 보고서를 작성해줘"})
+
+    def test_natural_mention_runs_all_roles_and_actual_sources_with_audit_gates(self):
+        captured = self.automatic_fixture()
+        request_id = self.natural_request()
+        state = self.broker.workflow.load(request_id)
+        self.assertEqual("reviewed", state["status"], state)
+        self.assertEqual(["plan", "research", "research", "research", "research_audit", "analysis",
+                          "analysis_audit", "synthesis", "synthesis_audit", "final_audit"],
+                         [p["input"]["context"]["automatic_workflow"]["stage"] for p in captured])
+        self.assertEqual(set(("manager", "researcher", "analyst", "auditor")), set(state["role_runs"]))
+        self.assertEqual("pass", self.broker.policy.reviewed_report_gate(request_id, scope=state["scope"]).status)
+        self.assertEqual("hold", self.broker.policy.gate(request_id, stage="final", scope=state["scope"]).status)
+        self.assertEqual({"r" * 26}, {root for _, root, _ in self.client.posts})
+        for payload in captured:
+            context = payload["input"]["context"]
+            if payload["role"] != "manager":
+                self.assertTrue(all(item["source_role"] == "manager" for item in context["verified_messages"]))
+            if payload["role"] == "auditor":
+                self.assertEqual("actual original source fixture", context["untrusted_web_sources"][0]["text"])
+        self.assertFalse(check_live_evidence(self.root), "Mocked workflows must never mark installation ready")
+        calls = len(captured)
+        self.natural_request()
+        self.assertEqual(calls, len(captured), "The same Mattermost request is deduplicated")
+
+    def test_rejection_revises_original_owner_and_reaudits_new_version(self):
+        captured = self.automatic_fixture(reject_once=True)
+        request_id = self.natural_request()
+        state = self.broker.workflow.load(request_id)
+        self.assertEqual("reviewed", state["status"], state)
+        self.assertEqual(2, state["artifacts"]["researcher"]["version"])
+        stages = [p["input"]["context"]["automatic_workflow"]["stage"] for p in captured]
+        self.assertEqual(2, stages.count("research_audit"))
+        self.assertGreater(stages.index("analysis"), max(i for i, stage in enumerate(stages) if stage == "research_audit"))
+        records = self.broker.policy.list_audit_records(request_id, role="auditor")
+        self.assertTrue(any(row["verdict"] == "reject" for row in records))
+        self.assertTrue(any(row["artifact_version"] == 2 and row["verdict"] == "pass" for row in records))
+
+    def test_manager_cannot_complete_without_workers_and_research_cannot_skip_tools(self):
+        captured = self.automatic_fixture(malicious_manager=True)
+        request_id = self.natural_request()
+        self.assertEqual("held", self.broker.workflow.load(request_id)["status"])
+        self.assertEqual([], self.broker.policy.list_artifacts(request_id))
+        self.assertEqual(1, len(captured), "Unauthorized routing is held without retrying")
+
+        captured = self.automatic_fixture(skip_research_tools=True)
+        request_id = self.natural_request("o" * 26)
+        self.assertEqual("held", self.broker.workflow.load(request_id)["status"])
+        self.assertEqual([], self.broker.policy.list_artifacts(request_id))
+        self.assertNotIn("analyst", [item["role"] for item in captured])
+
+    def test_live_install_test_rejects_injected_clients_or_workers(self):
+        with self.assertRaisesRegex(ValueError, "LiveTestRequiresProductionRuntime"):
+            self.broker.self_test("human-fixture")
+
+    def test_failed_source_is_returned_to_model_for_bounded_reselection(self):
+        from engine.research_team.web_tools import WebToolError
+        captured = self.automatic_fixture()
+        original_action, original_worker = self.broker.action, self.broker.worker
+        read_calls = []
+
+        def action(request, task, role, item):
+            if item["tool"] == "read_web":
+                read_calls.append(item["url"])
+                if item["url"] == "https://example.org/source":
+                    raise WebToolError("source returned HTTP 404")
+            result = original_action(request, task, role, item)
+            if item["tool"] == "search_web":
+                result["results"].append({"title": "Alternative", "url": "https://example.org/alternative", "snippet": "alternative"})
+            return result
+
+        def worker(payload, timeout, digest):
+            answer = original_worker(payload, timeout, digest)
+            state = payload["input"]["context"]["automatic_workflow"]
+            if state["stage"] == "research" and any("tool_error" in item for item in state["stage_results"]) and not any(item.get("content_in") for item in state["stage_results"]):
+                answer["text"] = json.dumps({"message": "select alternative", "actions": [{"tool": "read_web", "url": "https://example.org/alternative"}]})
+            return answer
+
+        self.broker.action, self.broker.worker = action, worker
+        request = self.natural_request()
+        self.assertEqual("reviewed", self.broker.workflow.load(request)["status"])
+        self.assertEqual(["https://example.org/source", "https://example.org/source", "https://example.org/alternative"], read_calls)
+        context = next(payload["input"]["context"] for payload in captured if payload["input"]["context"]["automatic_workflow"]["stage"] == "research" and payload["input"]["context"]["untrusted_web_sources"])
+        self.assertTrue(context["untrusted_web_sources"][0]["text"])
+        self.assertFalse(any("text" in item for item in context["automatic_workflow"]["stage_results"]))
 
 
 if __name__ == "__main__":

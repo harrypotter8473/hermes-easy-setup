@@ -41,6 +41,8 @@ try {
         } elseif ($package.Kind -eq 'Research') {
             Assert (-not (Test-Path -LiteralPath (Join-Path $root 'assets/bot-control')) -and (Test-Path -LiteralPath (Join-Path $root 'ui/ResearchWindow.xaml'))) 'Research ZIP includes unified local UI without optional server plugin'
             Assert ((Test-Path -LiteralPath (Join-Path $root 'assets/research-prompts/auditor.txt')) -and (Test-Path -LiteralPath (Join-Path $root 'engine/research_team/broker.py'))) 'Research ZIP includes personas and governed runtime'
+            foreach ($required in @('workflow.py','web_tools.py','native_cutover.py','profile_config.py','report_docx.py')) { Assert (Test-Path -LiteralPath (Join-Path $root ('engine/research_team/' + $required))) ('Research ZIP includes automatic workflow payload: ' + $required) }
+            Assert ((Test-Path -LiteralPath (Join-Path $root 'src/HermesEasySetup.ResearchDefaults.ps1')) -and (Test-Path -LiteralPath (Join-Path $root 'src/HermesEasySetup.ResearchMigration.ps1'))) 'Research ZIP includes wizard choices and record-preserving migration'
             $gui = 'HermesResearchSetup.Gui.ps1'
         } else {
             Assert (-not (Test-Path -LiteralPath (Join-Path $root 'HermesEasySetup.Gui.ps1')) -and (Test-Path -LiteralPath (Join-Path $root 'assets/bot-control/com.infonet.bot-control-0.6.2.tar.gz'))) 'Admin ZIP includes pinned plugin and omits user UI'

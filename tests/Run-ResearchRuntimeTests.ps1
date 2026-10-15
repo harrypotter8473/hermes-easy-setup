@@ -173,14 +173,11 @@ Import-Module (Join-Path $projectRoot 'src\HermesEasySetup.ResearchRuntime.psm1'
             [IO.File]::WriteAllText((Join-Path $profileDir '.env'), "CUSTOM_KEEP=1`r`nMATTERMOST_TOKEN=stale-native-token`r`n", (New-Object Text.UTF8Encoding($false)))
             return [pscustomobject]@{ Started = $true; TimedOut = $false; ExitCode = 0; StdOut = ''; StdErr = '' }
         }
-        if ($ArgumentList.Count -eq 6 -and $ArgumentList[0] -ceq '-p' -and $ArgumentList[2] -ceq 'config' -and
-            $ArgumentList[3] -ceq 'set' -and $ArgumentList[4].StartsWith('platforms.', [StringComparison]::Ordinal) -and
-            $ArgumentList[4].EndsWith('.enabled', [StringComparison]::Ordinal)) {
-            $platform = $ArgumentList[4].Substring(10, $ArgumentList[4].Length - 18)
-            if ($script:nativePlatformNames -cnotcontains $platform -or $ArgumentList[5] -cne 'false') {
-                throw 'Unexpected native-platform isolation command in research runtime test'
-            }
-            return [pscustomobject]@{ Started = $true; TimedOut = $false; ExitCode = 0; StdOut = ''; StdErr = '' }
+        if ($ArgumentList.Count -eq 8 -and $ArgumentList[0] -ceq '-I' -and $ArgumentList[1] -ceq '-S' -and
+            $ArgumentList[2] -ceq '-B' -and $ArgumentList[3] -like '*\profile_config.py' -and $ArgumentList[4] -ceq '--source' -and $ArgumentList[6] -ceq '--profile') {
+            $privatePath = Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $ArgumentList[3]))) 'private.json'
+            if (-not (Test-Path -LiteralPath $privatePath)) { throw 'ConnectionsMustBePreservedBeforeIsolation' }
+            return [pscustomobject]@{ Started = $true; TimedOut = $false; ExitCode = 0; StdOut = '{"isolated":true,"changed":true,"platforms_disabled":19}'; StdErr = '' }
         }
         if ($ArgumentList.Count -in @(7,9) -and $ArgumentList[0] -ceq '-I' -and $ArgumentList[1] -ceq '-S' -and
             $ArgumentList[2] -ceq '-B' -and $ArgumentList[4] -ceq 'check' -and $ArgumentList[5] -ceq '--root') {
@@ -246,26 +243,22 @@ Import-Module (Join-Path $projectRoot 'src\HermesEasySetup.ResearchRuntime.psm1'
         [IO.File]::WriteAllText($personalFile, 'personal profile must remain byte exact', (New-Object Text.UTF8Encoding($false)))
         $personalBefore = Read-TextHash $personalFile
         $output = @(Invoke-HermesResearchTeamSetup -InputObject $script:input @paths)
-        Assert ($output.Count -eq 1 -and $output[0].Succeeded -and $output[0].ExecutionMode -ceq 'GovernedBroker' -and $output[0].Profiles.Count -eq 4) 'Governed broker setup returns one four-role result'
+        Assert ($output.Count -eq 1 -and -not $output[0].Succeeded -and $output[0].PartialSuccess -and $output[0].ExecutionMode -ceq 'GovernedBroker' -and $output[0].Profiles.Count -eq 4) 'Pending broker setup returns one partial four-role result, never success'
         $result = $output[0]
-        Assert (-not $result.ExecutionReady -and @($result.PendingSettings).Count -eq 1) 'Unset policy is reported as pending rather than execution-ready'
+        Assert (-not $result.ExecutionReady -and @($result.PendingSettings).Count -eq 2 -and -not $result.WorkflowTest.Passed) 'Unset policy and unrun live test are pending rather than execution-ready'
         Assert ((Read-TextHash $personalFile) -ceq $personalBefore) 'Unrelated personal profile remains byte exact'
         Assert ((Count-ProfileCommands) -eq 4) 'Only four explicit profile-create commands are issued'
         $profileCalls = @($script:processes | Where-Object { $_.Arguments.Count -ge 1 -and $_.Arguments[0] -ceq 'profile' })
         Assert (@($profileCalls | Where-Object { $_.Arguments.Count -ne 4 -or $_.Arguments[3] -cne '--no-alias' }).Count -eq 0) 'Every profile create disables global alias mutation'
         $platformCalls = @($script:processes | Where-Object {
-            $_.Arguments.Count -eq 6 -and $_.Arguments[0] -ceq '-p' -and $_.Arguments[2] -ceq 'config' -and $_.Arguments[3] -ceq 'set'
+            $_.Arguments.Count -eq 8 -and $_.Arguments[3] -like '*\profile_config.py'
         })
-        Assert ($platformCalls.Count -eq (4 * $script:nativePlatformNames.Count)) 'Every research profile receives the complete native-platform isolation set'
-        $expectedCommand = Join-Path $paths.InstallDir 'bin\hermes.exe'
+        Assert ($platformCalls.Count -eq 4) 'Every research profile receives one isolated bulk configuration edit'
+        $expectedCommand = Join-Path $paths.InstallDir 'venv\Scripts\python.exe'
         foreach ($agent in @($script:input.Agents)) {
-            $agentCalls = @($platformCalls | Where-Object { $_.Arguments[1] -ceq $agent.ProfileName })
-            $actualKeys = @($agentCalls | ForEach-Object { [string]$_.Arguments[4] } | Sort-Object)
-            $expectedKeys = @($script:nativePlatformNames | ForEach-Object { 'platforms.' + $_ + '.enabled' } | Sort-Object)
-            Assert ($agentCalls.Count -eq $script:nativePlatformNames.Count -and
-                @($agentCalls | Where-Object { $_.Arguments[5] -cne 'false' }).Count -eq 0 -and
-                @($agentCalls | Where-Object { $_.FilePath -cne $expectedCommand -or $_.Environment.HERMES_HOME -cne $paths.HermesHome }).Count -eq 0 -and
-                (($actualKeys -join "`n") -ceq ($expectedKeys -join "`n"))) "Profile $($agent.ProfileName) disables every known native platform exactly once"
+            $agentCalls = @($platformCalls | Where-Object { $_.Arguments[7] -ceq (Join-Path $paths.HermesHome ('profiles\' + $agent.ProfileName)) })
+            Assert ($agentCalls.Count -eq 1 -and
+                @($agentCalls | Where-Object { $_.Arguments[5] -cne $paths.InstallDir -or $_.FilePath -cne $expectedCommand -or $_.Environment.HERMES_HOME -cne $paths.HermesHome }).Count -eq 0) "Profile $($agent.ProfileName) isolates native platforms using only its selected installation"
         }
         Assert ($script:requests.Count -eq 12 -and @($script:requests | Where-Object { $_.MaximumRedirection -ne 0 }).Count -eq 0) 'Four bot identities and channel memberships are checked without redirects'
 
@@ -329,7 +322,7 @@ Import-Module (Join-Path $projectRoot 'src\HermesEasySetup.ResearchRuntime.psm1'
         $beforeExisting = $script:processes.Count
         $existingResult = Invoke-HermesResearchTeamSetup -InputObject $script:input @existingPaths -UseExistingHermes
         $existingCalls = @($script:processes | Select-Object -Skip $beforeExisting)
-        Assert ($existingResult.Succeeded -and $existingResult.RuntimeKind -ceq 'Existing' -and $existingResult.ExistingGatewayLifecyclePreserved) 'Existing runtime uses the governed broker without taking over its gateway lifecycle'
+        Assert ($existingResult.PartialSuccess -and -not $existingResult.Succeeded -and $existingResult.RuntimeKind -ceq 'Existing' -and $existingResult.ExistingGatewayLifecyclePreserved) 'Existing runtime without live test remains partial and preserves its personal gateway lifecycle'
         Assert ([IO.File]::ReadAllText($existingPersonal) -ceq 'existing personal profile') 'Existing runtime preserves unrelated profiles'
         Assert (@($existingCalls | Where-Object { @($_.Arguments | Where-Object { $_ -ceq '--replace' -or $_ -ceq 'gateway' }).Count -gt 0 }).Count -eq 0) 'Existing runtime issues no gateway lifecycle argument'
         $existingCheck = @($existingCalls | Where-Object { $_.Arguments.Count -eq 7 -and $_.Arguments[4] -ceq 'check' })

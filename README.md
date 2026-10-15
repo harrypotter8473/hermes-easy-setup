@@ -2,8 +2,8 @@
 
 ## 실행 파일 선택
 
-- **다른 PC에서 연구실 마법사 실행:** 이 저장소에서 `Code → Download ZIP`으로 받아 압축을 전부 푼 뒤 `Start-HermesResearchSetup.cmd`를 더블클릭하세요. Git for Windows와 WSL2가 준비된 Windows 10/11 x64에서 `로컬 서버 → Hermes·모델 → 에이전트 4개` 순서로 진행합니다. Docker는 없으면 동의 후 설치할 수 있습니다. 운영 권한·자료 경로·실행 한도를 확정하기 전에는 연구 실행이 보류됩니다.
-- **1인 연구실 초기 버전:** `Start-HermesResearchSetup.cmd` — 같은 Windows PC에 Mattermost·Hermes·관리/조사/분석/감사 프로필을 구성합니다. 전체 TXT 지침과 역할 권한·버전별 감사 게이트·실행 한도를 중개 실행기로 연결합니다. 미정 운영 설정은 자동 허용하지 않습니다. [개인 연구실 안내](docs/research-guide.ko.md)
+- **다른 PC에서 연구실 마법사 실행:** 이 저장소에서 `Code → Download ZIP`으로 받아 압축을 전부 푼 뒤 `Start-HermesResearchSetup.cmd`를 더블클릭하세요. Git for Windows와 WSL2가 준비된 Windows 10/11 x64에서 `로컬 서버 → Hermes·모델 → 에이전트 4개` 순서로 진행합니다. Docker는 없으면 동의 후 설치할 수 있습니다. 작업 폴더·도구·실행 한도의 제안값을 화면에서 확인하고 모델·공개 웹 사용을 선택하면, JSON 작성 없이 실제 분업 테스트까지 진행합니다.
+- **1인 연구실:** `Start-HermesResearchSetup.cmd` — 같은 Windows PC에 Mattermost·Hermes·관리/조사/분석/감사 프로필을 구성합니다. 설치 테스트를 통과한 뒤 Mattermost에서 `@research-lead ○○에 대한 보고서 작성해줘`라고 요청하면 총괄 계획·배정 → 조사 → 분석 → 감사 → 결과 종합이 자동 진행됩니다. 실제 총괄 봇의 사용자 이름을 멘션하세요. [개인 연구실 안내](docs/research-guide.ko.md)
 - **사용자용:** `Start-HermesEasySetup.cmd` — 기존 연구실 서버에 Mattermost Desktop·Hermes 봇 연결.
 - **관리자용 (Windows 테스트 배포):** `Start-HermesAdminSetup.cmd` — 별도 Docker Mattermost 서버·시스템 관리자·팀·채널, Bot Control, 봇·토큰 발급, 선택적 NetBird 공유. [관리자 설치 안내](docs/admin-guide.ko.md)
 
@@ -11,9 +11,13 @@
 
 개인 연구실용에서는 Docker 설치 위치·공식 서명·Linux 엔진·PC 조건을 확인하고, 미설치 시 별도 동의 후 고정 공식 설치 파일을 다운로드·검증·설치합니다. Docker 약관은 직접 확인하며 Windows 기능·보안 정책·재부팅을 자동 처리하지 않습니다. 설치 완료와 엔진 준비 완료는 구분합니다. Docker 없는 설치 경로는 대안 안내만 제공하며 아직 구현되지 않았습니다.
 
-0.9.0 연구실 마법사는 **기존 Hermes 사용**을 별도로 선택할 수 있습니다. 기존 설치를 고정 버전으로 덮어쓰지 않고 데이터·코드 경로를 확인하며, 저장된 인증을 복사하거나 새 로그인하지 않습니다. 이 모드는 사용자가 선택해 신뢰하는 로컬 소스 설치의 호환성 검사이며, 새 설치의 고정 commit·attestation 검증과는 구분됩니다. 기존 프로필과 Gateway를 유지하고 새 연구 프로필만 추가합니다. 자세한 전제·제한은 [개인 연구실 안내](docs/research-guide.ko.md)를 확인하세요.
+연구실 마법사는 **기존 Hermes 사용**을 별도로 선택할 수 있습니다. 기존 설치를 고정 버전으로 덮어쓰지 않고 데이터·코드 경로를 확인하며, 저장된 인증을 복사하거나 새 로그인하지 않습니다. 이 모드는 사용자가 선택해 신뢰하는 로컬 소스 설치의 호환성 검사이며, 새 설치의 고정 commit·attestation 검증과는 구분됩니다. 개인 프로필·Gateway는 유지하며, 마법사가 소유한 이전 연구팀은 별도의 전환 선택으로 기록을 보존하면서 연결할 수 있습니다.
 
-0.10.0 연구실 경로는 네 개의 무제한 native Gateway 대신 권한·감사 중개 서비스 하나를 등록합니다. 제공된 네 페르소나 전체를 시스템 지침으로 읽고, 모델에는 임의 터미널·Python·네트워크·위임 도구를 노출하지 않습니다. 답변은 요청 스레드에 남기고 봇 간 응답은 명시적 멘션으로 연결하며, 관리 에이전트만 같은 요청의 다른 봇 발언을 관찰합니다. 사람의 채널 열람 권한을 제한하는 설정은 아닙니다. 지원된 중개 도구 밖의 검색·계산·게시 기능은 보류합니다. 이전 native 연구팀은 진행 중 작업을 보호하기 위해 자동 전환하지 않습니다. 설치·파일 검증과 실제 모델 응답 검증을 구분하며 GitHub에 자동 게시하지 않습니다.
+0.12.0 연구실 경로는 권한·감사 중개 서비스 하나에서 프로그램이 분업 순서를 관리합니다. 총괄 계획 → 조사와 원문 확보 → 조사 중간 감사 → 분석 → 분석 중간 감사 → 총괄 종합 → 종합 중간 감사·최종 감사 순서이며, 반려되면 해당 담당자가 새 버전을 작성하고 종속 단계도 재검사합니다. 총괄 혼자 보고서를 작성하는 경로로 우회하지 않습니다. 제공된 네 페르소나 TXT 전체를 공통 규칙 중복 없이 시스템 지침으로 읽습니다.
+
+조사에는 API 키가 필요 없는 DuckDuckGo 공개 검색과 HTTPS HTML·텍스트 원문 읽기가 연결됩니다. 답변·배정·결과는 같은 스레드에 남고, 봇 간 전달에는 실제 사용자 이름의 명시적 멘션이 필요하며, 관리 에이전트만 다른 봇 발언을 자동 관찰합니다. 사람의 채널 열람 권한은 바뀌지 않습니다. 설치된 모델·네 역할·검색·원문·감사·스레드 기록이 실제 테스트에서 모두 확인되어야 **사용 준비 완료**가 됩니다. 소스 ZIP 다운로드나 오프라인 테스트 통과는 각 PC의 사용 준비 완료를 뜻하지 않습니다.
+
+기존 네 연구 봇은 전환 체크박스를 선택하면 설정을 백업하고 대화·세션·산출물 기록을 유지하면서 전환합니다. 정확한 소유권을 확인한 연구팀 예약 작업만 중지하며, 해당 네 프로필의 기존 연결을 주차·분리한 뒤 새 서비스를 시작합니다. 개인 Gateway 호스트 전체를 중지하지 않으며, 이전 응답 경로가 분리되었는지 확인하지 못하면 새 엔진을 시작하지 않습니다. 감사가 끝난 결과는 검토 보고서이며 외부 게시·사용자 최종 승인을 대신하지 않습니다.
 
 Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes-agent)를 설치하는 한국어 안전 마법사입니다.
 
@@ -27,7 +31,7 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 
 ## 현재 상태
 
-- 버전 `0.10.0` 개인 연구실용 마법사 + 기존 Windows 네이티브 사용자용·별도 관리자 테스트 마법사
+- 버전 `0.12.0` 자동 분업 개인 연구실용 마법사 + 기존 Windows 네이티브 사용자용·별도 관리자 테스트 마법사
 - 6개 화면에서 Hermes 설치·검증, Mattermost Desktop 설치·서버 등록, OpenAI Codex OAuth와 모델 선택, 독립 프로필, NetBird Dashboard, 부팅 Gateway, Bot Control 등록과 매주 업데이트까지 구성합니다.
 - 위 6개 화면은 사용자용입니다. 관리자용 서버 설치·계정 생성·Bot Control·봇/토큰 발급은 별도 `Start-HermesAdminSetup.cmd`에서 진행합니다. 프로젝트의 5단계 개발 계획과 사용자 마법사의 6개 화면은 별개입니다.
 - 봇 발급·재사용, 공유 실패 시 롤백, 사용자 봇 토큰·채널 사전 검사, 관리자용/사용자용 ZIP 분리 패키징을 지원합니다. 다른 PC에서 실제 Hermes·LLM 응답까지의 최종 승인은 [두 PC 체크리스트](docs/two-pc-checklist.ko.md)를 따라 진행해야 합니다.
@@ -49,10 +53,10 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 저장소 소스에서 Windows PowerShell로 실행합니다. 출력 폴더는 소스 폴더 밖의 새 경로를 지정하세요.
 
 ```powershell
-.\Build-Distributions.ps1 -DestinationRoot C:\Temp\Hermes-0.10.0
+.\Build-Distributions.ps1 -DestinationRoot C:\Temp\Hermes-0.12.0
 ```
 
-`Hermes-Research-Setup-0.10.0.zip`, `Hermes-Admin-Setup-0.10.0.zip`, `Hermes-User-Setup-0.10.0.zip`, `SHA256SUMS.txt`가 만들어집니다. ZIP 안에는 파일별 `FILES.sha256`도 있습니다. 소스 허용 목록만 패키징하며 개인 설치 상태·토큰·로그·Git 기록은 포함하지 않습니다. 같은 이름의 파일은 덮어쓰지 않습니다. 생성·해시 대조·압축 해제 후 세 GUI의 비설치 검사는 `tests/Run-DistributionTests.ps1`로 실행합니다. 빌드가 GitHub 게시나 코드 서명을 수행하지는 않습니다.
+`Hermes-Research-Setup-0.12.0.zip`, `Hermes-Admin-Setup-0.12.0.zip`, `Hermes-User-Setup-0.12.0.zip`, `SHA256SUMS.txt`가 만들어집니다. Research ZIP에는 자동 분배 엔진·웹 도구·전환 코드·네 TXT·설치 중 실제 테스트가 포함되며 ZIP 안에는 파일별 `FILES.sha256`도 있습니다. 소스 허용 목록만 패키징하며 개인 설치 상태·토큰·로그·Git 기록은 포함하지 않습니다. 같은 이름의 파일은 덮어쓰지 않습니다. 생성·해시 대조·압축 해제 후 세 GUI의 비설치 검사는 `tests/Run-DistributionTests.ps1`로 실행합니다. 빌드가 GitHub 게시나 코드 서명 또는 설치 PC의 실제 분업 검증을 수행하지는 않습니다.
 
 ## 빠른 시작
 
@@ -106,7 +110,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\HermesEasySetup.ps1 `
   -Action Install -Apply -SkipComputerUse
 ```
 
-## 연구실 연결 단계
+## 연구실 연결 단계 (사용자용 마법사)
 
 - 새 프로필은 기본 프로필을 복제하지 않고 생성하므로 SOUL, 메모리, 세션과 대화 기록이 분리됩니다. Codex 인증 저장소만 Hermes의 정상 동작대로 공유됩니다.
 - 선택한 모델에 `openai-codex`를 고정하고 로컬 터미널, `display.tool_progress=log`, 압축 임계값 `0.85`, 자동 세션 초기화 없음이 적용됩니다.
@@ -229,3 +233,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-UpstreamCont
 ## 라이선스
 
 마법사 코드는 [MIT License](LICENSE)로 배포됩니다. Hermes Agent는 별도 프로젝트이며 해당 저장소의 라이선스와 정책을 따릅니다.
+
+
+## Word 보고서 기본 출력
+
+보고서는 기본적으로 Word(.docx) 파일로 같은 요청 스레드에 첨부됩니다. 조사·분석·종합의 중간 감사와 최종 감사를 통과한 정확한 원문을 프로그램이 변환합니다. Word 작성용 프로그램이나 추가 Python 패키지 설치는 필요 없습니다. 업로드 뒤 실제 파일을 다시 내려받아 SHA-256을 비교하며, 설치 마법사의 실제 테스트도 Word 전달 확인까지 통과해야 완료됩니다. 모델은 파일 경로·수신 채널·첨부 파일을 임의로 지정할 수 없습니다.
+
+일시적인 모델 오류·복구 가능한 응답 형식 오류는 2·5·10초 간격으로 최대 3회 재시도합니다. 자료 접근 오류는 5초 뒤 재시도하고, 실패가 반복되면 다른 검색어·자료를 검토하되 단계별 한도에서 보류합니다. 검색 제공자의 차단·장애를 우회하거나 성공으로 표시하지 않습니다. 인증·사용 한도·요청 규격 문제와 전송 여부가 불확실한 첨부는 중복 실행하지 않고 확인 대기 상태로 보존합니다.
+
+학술 자료는 검색어에 site:arxiv.org 를 포함하면 공식 arXiv API로 검색합니다. 반환된 초록 메타데이터는 원문 열람으로 세지 않으며 read_web을 별도로 실행해야 합니다. 일반 웹 검색의 장애·차단이 해소되었다는 뜻은 아닙니다. API 안내: https://info.arxiv.org/help/api/user-manual.html

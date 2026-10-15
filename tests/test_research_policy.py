@@ -394,6 +394,11 @@ class ResearchPolicyTests(unittest.TestCase):
         held = engine.gate(request_id, stage="final", scope="fixture-scope")
         self.assertEqual("hold", held.status)
         self.assertTrue(any("human_approval" in reason for reason in held.reasons))
+        reviewed = engine.reviewed_report_gate(request_id, scope="fixture-scope")
+        self.assertTrue(reviewed.passed)
+        with sqlite3.connect(self.state_path) as connection:
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM confirmations").fetchone()[0])
+        connection.close()
         self.confirm_final(engine, request_id, (research_v1, analysis_v1, manager_v1))
         self.assertTrue(engine.gate(request_id, stage="final", scope="fixture-scope").passed)
 
@@ -410,6 +415,7 @@ class ResearchPolicyTests(unittest.TestCase):
         self.assertEqual("hold", revised.status)
         self.assertTrue(any("dependency version changed" in reason for reason in revised.reasons))
         self.assertTrue(any("researcher:evidence:v2" in reason for reason in revised.reasons))
+        self.assertFalse(engine.reviewed_report_gate(request_id, scope="fixture-scope").passed)
 
         research_v2_read_task = engine.assign_task(
             request_id,

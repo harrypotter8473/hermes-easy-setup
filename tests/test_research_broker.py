@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from engine.research_team.broker import Broker, check
+from engine.research_team.broker import Broker, check, safe_worker_diagnostics
 from engine.research_team.policy import PolicyViolation
 
 
@@ -20,6 +20,14 @@ class FakeMattermost:
 
 
 class BrokerTests(unittest.TestCase):
+    def test_worker_diagnostics_drop_model_text_and_unknown_fields(self):
+        self.assertEqual({}, safe_worker_diagnostics({}))
+        result = safe_worker_diagnostics({"response_status": "completed", "output_characters": 123,
+            "fenced": True, "json_error_line": 2, "output_text": "SECRET_PROSE", "token": "PRIVATE",
+            "finish_reason": "arbitrary secret string", "incomplete_reason": None})
+        self.assertEqual({"response_status": "completed", "output_characters": 123,
+            "fenced": True, "json_error_line": 2, "incomplete_reason": None}, result)
+
     def setUp(self):
         self.fixture = tempfile.TemporaryDirectory(prefix="hermes-broker-tests-")
         self.root = Path(self.fixture.name).resolve()

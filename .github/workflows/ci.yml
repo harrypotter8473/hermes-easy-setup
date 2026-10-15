@@ -13,6 +13,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release:
+    needs: [windows, secret-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Publish verified installer distributions for a new version
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($version -cnotmatch '^\d+\.\d+\.\d+$') { throw 'Invalid release version' }
+          $tag = 'v' + $version
+          $releases = gh release list --limit 100 --json tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing releases' }
+          if (@($releases | Where-Object tagName -eq $tag).Count -gt 0) { Write-Output 'Existing release preserved'; exit 0 }
+          $out = Join-Path $env:RUNNER_TEMP ('Hermes-release-' + $version)
+          $built = .\Build-Distributions.ps1 -DestinationRoot $out
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.txt'
+          Copy-Item docs/release-notes.ko.md $notes
+          $files = @($built.Packages | ForEach-Object Path) + @($built.Checksums)
+          gh release create $tag @files --target $env:GITHUB_SHA --title ('Hermes Easy Setup ' + $version) --notes-file $notes --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
   windows:
     runs-on: windows-latest
     timeout-minutes: 25
@@ -111,11 +142,15 @@ jobs:
           .\tests\Run-ResearchTests.ps1
           .\tests\Run-ResearchPersonaTests.ps1
           .\tests\Run-ResearchRuntimeTests.ps1
+          .\tests\Run-ResearchDefaultsTests.ps1
+          .\tests\Run-ResearchMigrationTests.ps1
           powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File .\HermesResearchSetup.Gui.ps1 -SmokeTest
 
       - name: Offline research permissions, broker and Hermes worker tests
         shell: powershell
-        run: python -B -m unittest discover -s tests -p 'test_research_*.py' -v
+        run: |
+          python -m pip install ruamel.yaml==0.18.17
+          python -B -m unittest discover -s tests -p 'test_research_*.py' -v
 
       - name: Local research tests on PowerShell 7
         shell: pwsh
@@ -123,6 +158,8 @@ jobs:
           .\tests\Run-DockerTests.ps1
           .\tests\Run-ResearchTests.ps1
           .\tests\Run-ResearchRuntimeTests.ps1
+          .\tests\Run-ResearchDefaultsTests.ps1
+          .\tests\Run-ResearchMigrationTests.ps1
 
   secret-scan:
     runs-on: ubuntu-latest

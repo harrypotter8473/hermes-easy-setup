@@ -272,6 +272,7 @@ class ResearchWorkerTests(unittest.TestCase):
             ("persona", lambda value: value.__setitem__("instructions", value["instructions"] + "\nextra"), "MODEL_INPUT_CHANGED"),
             ("model", lambda value: value.__setitem__("model", "unapproved-model"), "MODEL_ROUTE_CHANGED"),
             ("token-limit", lambda value: value.__setitem__("max_output_tokens", validated["max_output_tokens"] + 1), "OUTPUT_LIMIT_UNVERIFIED"),
+            ("output-format", lambda value: value.__setitem__("text", {"format": {"type": "text"}}), "OUTPUT_FORMAT_UNVERIFIED"),
         )
         for name, mutate, expected_code in mutations:
             with self.subTest(mutation=name):
@@ -293,6 +294,7 @@ class ResearchWorkerTests(unittest.TestCase):
             ("token-limit", {"max_output_tokens": validated["max_output_tokens"] + 1}, "OUTPUT_LIMIT_UNVERIFIED"),
             ("native-tools", {"tools": [{"type": "function", "name": "terminal"}]}, "NATIVE_TOOLS_PRESENT"),
             ("store", {"store": True}, "MODEL_INPUT_CHANGED"),
+            ("output-format", {"text": {"format": {"type": "json_object"}}}, "OUTPUT_FORMAT_UNVERIFIED"),
         )
         for name, overrides, expected_code in mutations:
             with self.subTest(mutation=name):
@@ -374,6 +376,126 @@ class ResearchWorkerTests(unittest.TestCase):
         ):
             with self.subTest(response=response):
                 self.assertEqual((None, False), worker._reported_output_tokens(response))
+
+    def test_strict_response_schema_matches_stage_and_is_in_reserved_input(self):
+        request = self.request("researcher")
+        scope = "긴 한국어 요청 범위를 바꾸지 마세요.\n\n1. 원문\t확인\r\n2. 감사"
+        request["input"] = {"context": {"automatic_workflow": {"scope": scope, "output_name": "researcher", "allowed_actions": ["search_web", "read_web", "write_artifact"]}}}
+        validated = worker._validate_request(request)
+        kwargs = worker._build_direct_api_kwargs(SimpleNamespace(api_mode="codex_responses"), validated)
+        output = kwargs["text"]["format"]
+        self.assertEqual("json_schema", output["type"])
+        self.assertIs(True, output["strict"])
+        schema = output["schema"]
+        self.assertEqual(["message", "actions"], schema["required"])
+        self.assertIs(False, schema["additionalProperties"])
+        self.assertEqual(1, schema["properties"]["actions"]["minItems"])
+        actions = schema["properties"]["actions"]["items"]["anyOf"]
+        self.assertEqual({"search_web", "read_web", "write_artifact"},
+                         {item["properties"]["tool"]["enum"][0] for item in actions})
+        self.assertTrue(all(set(item["required"]) == set(item["properties"]) for item in actions))
+        write = next(item for item in actions if item["properties"]["tool"]["enum"] == ["write_artifact"])
+        self.assertEqual(["researcher"], write["properties"]["name"]["enum"])
+        self.assertEqual(["scope_" + hashlib.sha256(scope.encode("utf-8")).hexdigest()], write["properties"]["scope"]["enum"])
+        prepared = json.loads(worker._prepare_request(request)["prepared"])
+        self.assertEqual(kwargs["text"], prepared["output_format"])
+        self.assertEqual(validated["prompt_text"], prepared["system"])
+        self.assertEqual(scope, json.loads(prepared["messages"][0]["content"])["context"]["automatic_workflow"]["scope"])
+        self.assertNotIn("tools", kwargs)
+
+    def test_manager_planning_schema_requires_zero_actions_and_role_cannot_gain_dispatch(self):
+        for role, allowed in (("manager", []), ("researcher", ["dispatch"])):
+            request = self.request(role)
+            request["input"] = {"context": {"automatic_workflow": {"scope": "scope", "allowed_actions": allowed}}}
+            output = worker._response_text_format(worker._validate_request(request))
+            self.assertEqual(0, output["format"]["schema"]["properties"]["actions"]["maxItems"])
+
+    def test_audit_schema_binds_each_exact_dependency_and_assigned_stage(self):
+        request = self.request("auditor")
+        refs = [{"id": "artifact_" + str(index) * 32, "version": index + 1, "sha256": str(index) * 64,
+                 "task_id": "task_" + str(index) * 32, "role": role, "scope": "원래 범위"}
+                for index, role in enumerate(("researcher", "analyst", "manager"))]
+        request["input"] = {"context": {"automatic_workflow": {"scope": "원래 범위", "allowed_actions": ["audit"]},
+                                        "task": {"audit_stage": "final", "dependencies": refs}}}
+        schema = worker._response_text_format(worker._validate_request(request))["format"]["schema"]
+        action = schema["properties"]["actions"]["items"]
+        self.assertEqual(["final"], action["properties"]["stage"]["enum"])
+        token = "scope_" + hashlib.sha256("원래 범위".encode("utf-8")).hexdigest()
+        self.assertEqual([token], action["properties"]["scope"]["enum"])
+        bound = action["properties"]["artifact_ref"]["anyOf"]
+        self.assertEqual(3, len(bound))
+        for original, item in zip(refs, bound):
+            self.assertEqual({**original, "scope": token}, {name: value["enum"][0] for name, value in item["properties"].items()})
+        request["input"]["context"]["task"]["dependencies"][0]["scope"] = "변경된 범위"
+        with self.assertRaises(worker.WorkerError):
+            worker._response_text_format(worker._validate_request(request))
+
+    def test_exact_standalone_json_fence_is_accepted_but_no_prose_or_repair(self):
+        value = '{"message":"ok","actions":[]}'
+        self.assertEqual(value, worker._assert_json_model_reply("```json\n" + value + "\n```"))
+        self.assertEqual(value, worker._assert_json_model_reply("```\n" + value + "\n```"))
+        for text in ("Here is the result:\n" + value, value + "\nDone", "```json\n" + value,
+                     '{"message":"partial', '{"message":"ok","message":"duplicate","actions":[]}',
+                     '{"message":"ok","actions":[{"value":NaN}]}', '{"message":"ok","actions":[]} {}'):
+            with self.subTest(shape=text[:12]), self.assertRaises(worker.WorkerError):
+                worker._assert_json_model_reply(text)
+
+    def test_incomplete_or_refused_output_is_classified_without_accepting_partial_actions(self):
+        agent = SimpleNamespace(_get_transport=lambda: _FakeTransport())
+        for status, reason, code in (("incomplete", "max_output_tokens", "MODEL_OUTPUT_TRUNCATED"),
+                                     ("incomplete", None, "MODEL_OUTPUT_INCOMPLETE"),
+                                     ("incomplete", "content_filter", "MODEL_OUTPUT_REFUSED"),
+                                     ("failed", None, "MODEL_RESPONSE_FAILED")):
+            response = SimpleNamespace(status=status, incomplete_details={"reason": reason},
+                output_text='{"message":"SECRET_PROSE","actions":[]}', output=[])
+            with self.subTest(status=status, reason=reason), self.assertRaises(worker.WorkerError) as raised:
+                worker._normalize_direct_response(agent, response)
+            self.assert_worker_error(raised, code)
+            self.assertNotIn("SECRET_PROSE", json.dumps(raised.exception.diagnostics))
+            self.assertGreater(raised.exception.diagnostics["output_characters"], 0)
+
+    def test_json_failure_has_shape_only_diagnostics_and_no_automatic_model_retry(self):
+        class BadJSONAgent(_FakeAgent):
+            def _interruptible_api_call(self, kwargs):
+                self.client.responses.response = SimpleNamespace(status="completed", output=[],
+                    output_text='{"message":"SECRET_PROSE", "actions":[')
+                return super()._interruptible_api_call(kwargs)
+
+        request = self.request()
+        with self.assertRaises(worker.WorkerError) as raised:
+            worker._execute_request(request, self.prepared_digest(request), agent_class=BadJSONAgent)
+        self.assert_worker_error(raised, "MODEL_OUTPUT_NOT_JSON")
+        metadata = raised.exception.diagnostics
+        self.assertEqual(1, metadata["model_call_count"])
+        self.assertTrue(metadata["starts_with_object"])
+        self.assertEqual("completed", metadata["response_status"])
+        self.assertIn("json_error_column", metadata)
+        self.assertNotIn("SECRET_PROSE", json.dumps(metadata))
+        self.assertEqual(1, len(BadJSONAgent.instances[-1].client.responses.calls))
+
+    def test_provider_failures_are_classified_without_leaking_body_or_hidden_retries(self):
+        for status, body_code, expected in (
+            (400, "invalid_json_schema", "MODEL_PROTOCOL_REJECTED"),
+            (401, "invalid_api_key", "MODEL_AUTH_REJECTED"),
+            (429, "rate_limit_exceeded", "MODEL_RATE_LIMITED"),
+            (429, "insufficient_quota", "MODEL_QUOTA_EXCEEDED"),
+            (503, "unavailable", "MODEL_TRANSIENT_ERROR"),
+        ):
+            class ProviderException(Exception):
+                status_code = status
+                body = {"error": {"code": body_code, "message": "PRIVATE_CREDENTIAL"}}
+            class FailingAgent(_FakeAgent):
+                def __init__(self, **kwargs):
+                    super().__init__(**kwargs)
+                    def fail(**kwargs):
+                        raise ProviderException("PRIVATE_CREDENTIAL")
+                    self.client.responses.create = fail
+            request = self.request()
+            with self.subTest(status=status, body_code=body_code), self.assertRaises(worker.WorkerError) as raised:
+                worker._execute_request(request, self.prepared_digest(request), agent_class=FailingAgent)
+            self.assert_worker_error(raised, expected)
+            self.assertEqual(status, raised.exception.diagnostics["http_status"])
+            self.assertNotIn("PRIVATE_CREDENTIAL", str(raised.exception) + json.dumps(raised.exception.diagnostics))
 
 
 if __name__ == "__main__":

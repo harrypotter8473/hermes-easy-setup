@@ -84,10 +84,11 @@ _REQUIRED_AGENT_PARAMETERS = frozenset(
 class WorkerError(Exception):
     """Expected failure with a stable, non-secret public error."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, diagnostics: Optional[Mapping[str, Any]] = None) -> None:
         super().__init__(message)
         self.code = code
         self.public_message = message
+        self.diagnostics = dict(diagnostics or {})
 
 
 class _DiscardText:
@@ -530,22 +531,121 @@ def _assert_json_model_reply(text: Any) -> str:
         raise WorkerError("INVALID_MODEL_OUTPUT", "Hermes returned a non-text response.")
     if not text or len(text.encode("utf-8")) > 8_388_608:
         raise WorkerError("INVALID_MODEL_OUTPUT", "The model response size is invalid.")
+    # A complete, standalone JSON fence is presentation only. Never extract a
+    # substring from prose or repair partial JSON; those remain invalid actions.
+    text = text.strip()
+    fence = re.fullmatch(r"```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```", text, flags=re.IGNORECASE)
+    if fence:
+        text = fence[1].strip()
+
+    def reject_constant(_value):
+        raise WorkerError("MODEL_OUTPUT_NOT_JSON", "Non-finite JSON numbers are forbidden.")
+
     try:
-        parsed = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+        parsed = json.loads(text, object_pairs_hook=_reject_duplicate_keys, parse_constant=reject_constant)
     except WorkerError as exc:
         raise WorkerError("MODEL_OUTPUT_NOT_JSON", "The model response contains duplicate JSON keys.") from exc
-    except (json.JSONDecodeError, RecursionError) as exc:
-        raise WorkerError("MODEL_OUTPUT_NOT_JSON", "The model response is not one strict JSON object.") from exc
+    except json.JSONDecodeError as exc:
+        raise WorkerError("MODEL_OUTPUT_NOT_JSON", "The model response is not one strict JSON object.",
+                          {"json_error_line": exc.lineno, "json_error_column": exc.colno}) from exc
+    except RecursionError as exc:
+        raise WorkerError("MODEL_OUTPUT_NOT_JSON", "The model response JSON nesting is invalid.") from exc
     if not isinstance(parsed, dict):
         raise WorkerError("MODEL_OUTPUT_NOT_JSON", "The model response must be a JSON object.")
+    if (set(parsed) != {"message", "actions"} or not isinstance(parsed["message"], str) or
+            not isinstance(parsed["actions"], list) or any(not isinstance(item, dict) for item in parsed["actions"])):
+        raise WorkerError("MODEL_OUTPUT_SCHEMA_INVALID", "The model response does not match the action envelope.")
     return text
 
 
-def _logical_prepared_input(system_text: str, user_text: str) -> bytes:
+def _response_text_format(request: Mapping[str, Any]) -> Dict[str, Any]:
+    """Official Responses text.format; this constrains data, not executable tools.
+
+    Action authority remains in policy/broker. No function tools, JSON repair,
+    provider fallback or additional model request is enabled by this schema.
+    """
+    def obj(fields):
+        return {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
+
+    string = {"type": "string"}
+    ref = obj({"id": string, "version": {"type": "integer"}, "sha256": string,
+               "task_id": string, "role": {"type": "string", "enum": sorted(_ROLES)}, "scope": string})
+
+    def action(name, fields):
+        return obj({"tool": {"type": "string", "enum": [name]}, **fields})
+
+    definitions = {
+        "read_text": action("read_text", {"path": string}),
+        "search_web": action("search_web", {"query": string, "max_results": {"type": ["integer", "null"]}}),
+        "read_web": action("read_web", {"url": string}),
+        "write_artifact": action("write_artifact", {"name": string, "scope": string, "content": string}),
+        "dispatch": action("dispatch", {"role": {"type": "string", "enum": sorted(_ROLES)}, "scope": string,
+            "instructions": string, "phase": {"type": "string", "enum": ["prepare", "main", "audit"]},
+            "dependencies": {"type": "array", "items": ref},
+            "audit_stage": {"type": ["string", "null"], "enum": ["intermediate", "final", None]}}),
+        "audit": action("audit", {"artifact_ref": ref, "stage": {"type": "string", "enum": ["intermediate", "final"]},
+            "scope": string, "verdict": {"type": "string", "enum": ["pass", "reject", "unverifiable"]}, "notes": string}),
+        "complete": action("complete", {"scope": string}),
+    }
+    allowed = {"manager": {"read_text", "write_artifact", "dispatch", "complete"},
+               "researcher": {"read_text", "search_web", "read_web", "write_artifact"},
+               "analyst": {"read_text", "write_artifact"}, "auditor": {"read_text", "audit"}}[request["role"]]
+    data = json.loads(request["user_message"])
+    context = data.get("context") if isinstance(data, dict) else None
+    automatic = context.get("automatic_workflow") if isinstance(context, dict) else None
+    if isinstance(automatic, dict) and isinstance(automatic.get("allowed_actions"), list):
+        selected = automatic["allowed_actions"]
+        if any(not isinstance(name, str) or name not in definitions for name in selected):
+            raise WorkerError("INVALID_REQUEST", "Automatic stage action declarations are invalid.")
+        allowed &= set(selected)
+        # These values were already chosen and verified by the dispatcher.
+        # Constrain metadata exactly instead of asking the model to reproduce
+        # long scopes, logical filenames, or immutable audit references.
+        scope = automatic.get("scope")
+        output_name = automatic.get("output_name")
+        if not isinstance(scope, str) or not scope.strip() or len(scope) > 256:
+            raise WorkerError("INVALID_REQUEST", "Automatic stage scope is missing or invalid.")
+        # Strict-output enum literals reject control characters such as newlines.
+        # Keep the complete human scope in context and bind wire metadata to an
+        # ASCII digest; the broker validates and restores it before policy checks.
+        wire_scope = "scope_" + hashlib.sha256(scope.encode("utf-8")).hexdigest()
+        for name in ("write_artifact", "dispatch", "audit", "complete"):
+            definitions[name]["properties"]["scope"] = {"type": "string", "enum": [wire_scope]}
+        if "write_artifact" in allowed:
+            expected_name = "report" if request["role"] == "manager" else request["role"]
+            if output_name != expected_name:
+                raise WorkerError("INVALID_REQUEST", "Automatic artifact name does not match its role.")
+            definitions["write_artifact"]["properties"]["name"] = {"type": "string", "enum": [output_name]}
+        if "audit" in allowed:
+            task = context.get("task")
+            stage = task.get("audit_stage") if isinstance(task, dict) else None
+            refs = task.get("dependencies") if isinstance(task, dict) else None
+            if stage not in ("intermediate", "final") or not isinstance(refs, list) or not refs or len(refs) > 8:
+                raise WorkerError("INVALID_REQUEST", "Automatic audit stage or exact inputs are missing.")
+            bound_refs = []
+            for item in refs:
+                if (not isinstance(item, dict) or set(item) != {"id", "version", "sha256", "task_id", "role", "scope"} or
+                        item.get("scope") != scope or type(item.get("version")) is not int or item["version"] < 1 or
+                        any(not isinstance(item[field], str) or not item[field] for field in ("id", "sha256", "task_id", "role", "scope"))):
+                    raise WorkerError("INVALID_REQUEST", "Automatic audit artifact binding is invalid.")
+                bound_refs.append(obj({key: {"type": "integer" if key == "version" else "string", "enum": [wire_scope if key == "scope" else value]}
+                                       for key, value in item.items()}))
+            definitions["audit"]["properties"]["stage"] = {"type": "string", "enum": [stage]}
+            definitions["audit"]["properties"]["artifact_ref"] = bound_refs[0] if len(bound_refs) == 1 else {"anyOf": bound_refs}
+    variants = [definitions[name] for name in sorted(allowed)]
+    items = {"anyOf": variants} if len(variants) > 1 else (variants[0] if variants else obj({}))
+    schema = obj({"message": string, "actions": {"type": "array", "items": items, "maxItems": 8 if allowed else 0}})
+    if isinstance(automatic, dict) and allowed:
+        schema["properties"]["actions"]["minItems"] = 1
+    return {"format": {"type": "json_schema", "name": "research_actions", "strict": True, "schema": schema}}
+
+
+def _logical_prepared_input(system_text: str, user_text: str, output_format: Optional[Mapping[str, Any]] = None) -> bytes:
     return json.dumps(
         {
             "messages": [{"role": "user", "content": user_text}],
             "system": system_text,
+            "output_format": output_format,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -856,7 +956,10 @@ def _assert_and_normalize_wire_input(
         raise WorkerError("MODEL_INPUT_CHANGED", "Hermes changed the broker-reserved model input.")
     if _count_text_occurrences(api_kwargs, request["prompt_text"]) != 1:
         raise WorkerError("MODEL_INPUT_CHANGED", "The persona must appear exactly once in the model request.")
-    actual_prepared = _logical_prepared_input(system_text, user_text)
+    expected_format = _response_text_format(request)
+    if api_mode == "codex_responses" and api_kwargs.get("text") != expected_format:
+        raise WorkerError("OUTPUT_FORMAT_UNVERIFIED", "Hermes changed the governed structured-output format.")
+    actual_prepared = _logical_prepared_input(system_text, user_text, expected_format)
     actual_digest = hashlib.sha256(actual_prepared).hexdigest()
     if not hmac.compare_digest(actual_digest, expected_prepare_sha256.lower()):
         raise WorkerError(
@@ -921,7 +1024,7 @@ def _prepare_agent_input(agent: Any, request: Mapping[str, Any]) -> bytes:
     effective_system = request["prompt_text"]
     agent._cached_system_prompt = effective_system
     agent._cached_system_prompt_static = effective_system
-    return _logical_prepared_input(effective_system, request["user_message"])
+    return _logical_prepared_input(effective_system, request["user_message"], _response_text_format(request))
 
 
 def _build_direct_api_kwargs(agent: Any, request: Mapping[str, Any]) -> Dict[str, Any]:
@@ -943,20 +1046,66 @@ def _build_direct_api_kwargs(agent: Any, request: Mapping[str, Any]) -> Dict[str
             }
         ],
         "store": False,
+        "text": _response_text_format(request),
         "max_output_tokens": request["max_output_tokens"],
         "timeout": float(request["timeout_seconds"]),
     }
 
 
+def _field(value: Any, name: str, default: Any = None) -> Any:
+    return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+
+
+def _response_diagnostics(response: Any, normalized: Any = None) -> Dict[str, Any]:
+    """Only shape/status counters; never persist model prose or reasoning."""
+    known_statuses = {"completed", "incomplete", "failed", "cancelled", "queued", "in_progress"}
+    status = _field(response, "status")
+    reason = _field(_field(response, "incomplete_details"), "reason")
+    finish = _field(normalized, "finish_reason")
+    content = _field(normalized, "content") if normalized is not None else _field(response, "output_text")
+    content = content if isinstance(content, str) else ""
+    output = _field(response, "output", [])
+    refused = any(_field(part, "type") == "refusal"
+        for item in (output if isinstance(output, list) else [])
+        for part in (_field(item, "content", []) or []) if isinstance(_field(item, "content", []), list))
+    return {"response_status": status if status in known_statuses else "unknown",
+            "incomplete_reason": reason if reason in {"max_output_tokens", "content_filter"} else "other" if reason else None,
+            "finish_reason": finish if finish in {"stop", "length", "incomplete", "content_filter", "tool_calls"} else "unknown",
+            "output_characters": len(content), "output_bytes": len(content.encode("utf-8")),
+            "output_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "fenced": content.strip().startswith("```"), "starts_with_object": content.lstrip().startswith("{"),
+            "refusal": refused}
+
+
 def _normalize_direct_response(agent: Any, response: Any) -> str:
+    metadata = _response_diagnostics(response)
+    if metadata["refusal"] or metadata["incomplete_reason"] == "content_filter":
+        raise WorkerError("MODEL_OUTPUT_REFUSED", "The provider returned a refusal, not executable actions.", metadata)
+    if metadata["response_status"] == "incomplete" and metadata["incomplete_reason"] == "max_output_tokens":
+        raise WorkerError("MODEL_OUTPUT_TRUNCATED", "The model reached its output-token limit; no partial actions were accepted.", metadata)
+    if metadata["response_status"] in {"incomplete", "queued", "in_progress"}:
+        raise WorkerError("MODEL_OUTPUT_INCOMPLETE", "The model response is incomplete; no partial actions were accepted.", metadata)
+    if metadata["response_status"] in {"failed", "cancelled"}:
+        raise WorkerError("MODEL_RESPONSE_FAILED", "The provider did not complete the model response.", metadata)
     transport = agent._get_transport()
     normalize = getattr(transport, "normalize_response", None)
     if not callable(normalize):
         raise WorkerError("HERMES_API_INCOMPATIBLE", "Hermes has no response normalizer.")
-    normalized = normalize(response)
+    try:
+        normalized = normalize(response)
+    except Exception as exc:
+        raise WorkerError("MODEL_RESPONSE_NORMALIZATION_FAILED", "Hermes could not normalize the completed response.", metadata) from exc
+    metadata = _response_diagnostics(response, normalized)
     if getattr(normalized, "tool_calls", None):
-        raise WorkerError("NATIVE_TOOL_CALL_BLOCKED", "The model returned a forbidden native tool call.")
-    return _assert_json_model_reply(getattr(normalized, "content", None))
+        raise WorkerError("NATIVE_TOOL_CALL_BLOCKED", "The model returned a forbidden native tool call.", metadata)
+    if metadata["finish_reason"] in {"incomplete", "length", "content_filter"}:
+        code = {"incomplete": "MODEL_OUTPUT_INCOMPLETE", "length": "MODEL_OUTPUT_TRUNCATED", "content_filter": "MODEL_OUTPUT_REFUSED"}[metadata["finish_reason"]]
+        raise WorkerError(code, "The normalized response did not contain completed executable actions.", metadata)
+    try:
+        return _assert_json_model_reply(getattr(normalized, "content", None))
+    except WorkerError as exc:
+        exc.diagnostics = {**metadata, **exc.diagnostics}
+        raise
 
 
 def _reported_output_tokens(response: Any) -> Tuple[Optional[int], bool]:
@@ -1040,11 +1189,33 @@ def _run_agent(
             "prepared_input_bytes": len(prepared_input),
             "prepared_input_sha256": prepared_sha256,
         }
-    except WorkerError:
+    except WorkerError as exc:
+        if "physical_fence" in locals():
+            exc.diagnostics["model_call_count"] = physical_fence.physical_calls
         raise
     except Exception as exc:
         # Provider exceptions may contain credentials or response bodies.  Do
         # not forward the exception text across the worker boundary.
+        status = getattr(exc, "status_code", None)
+        if status in (400, 422):
+            raise WorkerError("MODEL_PROTOCOL_REJECTED", "The provider rejected the governed request format; no fallback call was made.",
+                              {"http_status": status}) from exc
+        if status in (401, 403):
+            raise WorkerError("MODEL_AUTH_REJECTED", "Model authorization requires user attention.",
+                              {"http_status": status}) from exc
+        if status == 429:
+            body = getattr(exc, "body", None)
+            if isinstance(body, dict):
+                body = body.get("error", body)
+            code = body.get("code") if isinstance(body, dict) else None
+            quota = code in ("insufficient_quota", "billing_hard_limit_reached", "usage_limit_reached")
+            raise WorkerError("MODEL_QUOTA_EXCEEDED" if quota else "MODEL_RATE_LIMITED",
+                              "Model capacity is unavailable.", {"http_status": status}) from exc
+        if status in (408, 409, 425, 500, 502, 503, 504):
+            raise WorkerError("MODEL_TRANSIENT_ERROR", "A temporary provider failure occurred.",
+                              {"http_status": status}) from exc
+        if type(exc).__name__ in ("APITimeoutError", "APIConnectionError", "ConnectError", "ReadTimeout", "TimeoutError"):
+            raise WorkerError("MODEL_CONNECTION_FAILED", "The model connection failed temporarily.") from exc
         raise WorkerError("HERMES_CALL_FAILED", "The governed Hermes model call failed.") from exc
     finally:
         _close_agent(agent)
@@ -1071,7 +1242,7 @@ def _prepare_request(raw_request: Any, agent_class: Optional[Type[Any]] = None) 
     # could read/refresh OAuth state before the broker has reserved the exact
     # request budget.  The run phase independently verifies this serialization
     # against the final pre-network kwargs and checks the live tool/client state.
-    prepared_input = _logical_prepared_input(request["prompt_text"], request["user_message"])
+    prepared_input = _logical_prepared_input(request["prompt_text"], request["user_message"], _response_text_format(request))
     return {
         "ok": True,
         "prepared": prepared_input.decode("utf-8"),
@@ -1167,7 +1338,7 @@ def main() -> int:
         _write_stdout(result)
         return 0
     except WorkerError as exc:
-        _write_stdout({"ok": False, "error": {"code": exc.code, "message": exc.public_message}})
+        _write_stdout({"ok": False, "error": {"code": exc.code, "message": exc.public_message, "diagnostics": exc.diagnostics}})
         return 2
     except Exception:
         _write_stdout(

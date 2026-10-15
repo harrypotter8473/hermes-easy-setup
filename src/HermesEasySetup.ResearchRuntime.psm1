@@ -7,6 +7,8 @@ $script:ResearchGatewayReadyTimeoutSeconds = 60
 $script:ResearchExistingGatewayReadyTimeoutSeconds = 75
 
 . (Join-Path $PSScriptRoot 'HermesEasySetup.ResearchGovernance.ps1')
+. (Join-Path $PSScriptRoot 'HermesEasySetup.ResearchDefaults.ps1')
+. (Join-Path $PSScriptRoot 'HermesEasySetup.ResearchMigration.ps1')
 
 function Publish-HermesResearchStage {
     param([AllowNull()][scriptblock]$Callback, [string]$Stage, [string]$Message, [int]$Percent, [string]$State = 'running')
@@ -15,7 +17,7 @@ function Publish-HermesResearchStage {
 
 function Invoke-HermesResearchMattermostAPI {
     param([string]$ServerURL, [string]$Path, [string]$Token)
-    if ($Path -cnotmatch '^/api/v4/(users/me|channels/[a-z0-9]{26}(/members/[a-z0-9]{26})?)$') { throw 'ResearchApiPathRejected' }
+    if ($Path -cnotmatch '^/api/v4/(users/me|users/username/[a-z0-9][a-z0-9._-]{0,63}|channels/[a-z0-9]{26}(/members/[a-z0-9]{26})?)$') { throw 'ResearchApiPathRejected' }
     try {
         $response = Invoke-WebRequest -Uri ($ServerURL.TrimEnd('/') + $Path) -Method GET -UseBasicParsing -TimeoutSec 30 -MaximumRedirection 0 -Headers @{ Authorization = 'Bearer ' + $Token } -ErrorAction Stop
         if ([int]$response.StatusCode -ne 200) { throw 'UnexpectedStatus' }
@@ -390,7 +392,8 @@ function Invoke-HermesResearchTeamSetup {
         $sourceAgent = @($InputObject.Agents | Where-Object { $_.ProfileName -ceq $safeAgent.ProfileName })[0]
         [pscustomobject]@{ ProfileName = $safeAgent.ProfileName; DisplayName = $safeAgent.DisplayName; RoleId = $safeAgent.RoleId; BotToken = [string]$sourceAgent.BotToken }
     })
-    $InputObject = [pscustomobject]@{ SchemaVersion = 1; ServerURL = $summary.ServerURL; HomeChannelID = $summary.HomeChannelID; ModelName = $summary.ModelName; Roles = $summary.Roles; Agents = $normalizedAgents }
+    $wizardOptions = $(if ($InputObject.PSObject.Properties['WizardOptions']) { $InputObject.WizardOptions } else { $null })
+    $InputObject = [pscustomobject]@{ SchemaVersion = 1; ServerURL = $summary.ServerURL; HomeChannelID = $summary.HomeChannelID; ModelName = $summary.ModelName; Roles = $summary.Roles; Agents = $normalizedAgents; WizardOptions = $wizardOptions }
     $serverUri = [Uri]$InputObject.ServerURL
     $loopbackIP = $null
     $isLoopback = ($serverUri.DnsSafeHost -ieq 'localhost')
@@ -411,6 +414,7 @@ function Invoke-HermesResearchTeamSetup {
     } else {
         $paths = Get-HermesDefaultPaths -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot
     }
+    if ($null -ne $wizardOptions) { $null = Assert-HermesResearchWizardOptions -Options $wizardOptions -RuntimeRoot $paths.RuntimeRoot }
     # Disallow accidentally copying a known token into public metadata or argv.
     $publicText = (@($paths.HermesHome, $paths.InstallDir, $paths.RuntimeRoot, $InputObject.ServerURL, $InputObject.HomeChannelID, $InputObject.ModelName) + @($InputObject.Agents | ForEach-Object { $_.ProfileName; $_.DisplayName; $_.RoleId }) + @($InputObject.Roles | ForEach-Object { $_.Id; $_.Name; $_.Instructions })) -join "`n"
     foreach ($agent in @($InputObject.Agents)) { if ($publicText.Contains([string]$agent.BotToken)) { throw '봇 토큰을 이름·역할·경로·기타 공개 설정에 넣을 수 없습니다.' } }
@@ -434,4 +438,4 @@ function Invoke-HermesResearchTeamSetup {
     return Invoke-HermesGovernedResearchSetup -InputObject $InputObject -Paths $paths -Runtime $runtime -CommandPath $expectedCommand -Identities $identities -ReuseExistingProfiles:$ReuseExistingProfiles -UseExistingHermes:$UseExistingHermes -ProgressCallback $ProgressCallback
 }
 
-Export-ModuleMember -Function @('Invoke-HermesResearchTeamSetup','New-HermesResearchPolicy','Get-HermesResearchPolicy','Save-HermesResearchPolicy')
+Export-ModuleMember -Function @('Invoke-HermesResearchTeamSetup','New-HermesResearchPolicy','Get-HermesResearchPolicy','Save-HermesResearchPolicy','New-HermesResearchWizardOptions','Assert-HermesResearchWizardOptions','New-HermesResearchWizardPolicy')

@@ -221,7 +221,7 @@ function ConvertTo-HermesResearchServerURL {
 function Assert-HermesResearchTeamInput {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$InputObject, $Roles)
-    Assert-HermesResearchFields $InputObject @('SchemaVersion', 'ServerURL', 'HomeChannelID', 'ModelName', 'Agents') @('Roles') '연구 팀 입력'
+    Assert-HermesResearchFields $InputObject @('SchemaVersion', 'ServerURL', 'HomeChannelID', 'ModelName', 'Agents') @('Roles','WizardOptions') '연구 팀 입력'
     Assert-HermesResearchSchemaVersion $InputObject.SchemaVersion
     $server = ConvertTo-HermesResearchServerURL $InputObject.ServerURL
     if ($InputObject.HomeChannelID -isnot [string] -or $InputObject.HomeChannelID -cnotmatch '^[a-z0-9]{26}$') {

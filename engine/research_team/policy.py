@@ -27,7 +27,15 @@ WORKER_ROLES = ("researcher", "analyst", "auditor")
 SCENARIOS = ("S1", "S2", "S3")
 AUDIT_STAGES = ("intermediate", "final")
 AUDIT_VERDICTS = ("pass", "reject", "unverifiable")
-BROKER_TOOLS = frozenset({"read_text", "write_artifact", "dispatch", "audit", "complete"})
+BROKER_TOOLS = frozenset({"read_text", "write_artifact", "dispatch", "audit", "complete", "search_web", "read_web"})
+WEB_TOOLS = frozenset({"search_web", "read_web"})
+WEB_LIMITS = {
+    "timeout_seconds": (1, 60),
+    "max_response_bytes": (1024, 4_000_000),
+    "max_text_chars": (100, 200_000),
+    "max_results": (1, 10),
+    "max_redirects": (0, 5),
+}
 LIMIT_KEYS = (
     "attempts",
     "revisions",
@@ -347,6 +355,21 @@ class PolicyEngine:
                     amount INTEGER NOT NULL,
                     PRIMARY KEY(request_id, role, kind)
                 );
+                CREATE TABLE IF NOT EXISTS web_evidence(
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
+                    request_id TEXT NOT NULL REFERENCES requests(id),
+                    task_id TEXT NOT NULL REFERENCES tasks(id),
+                    role TEXT NOT NULL,
+                    tool TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    result_sha256 TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TRIGGER IF NOT EXISTS web_evidence_no_update
+                BEFORE UPDATE ON web_evidence BEGIN SELECT RAISE(ABORT, 'web evidence is append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS web_evidence_no_delete
+                BEFORE DELETE ON web_evidence BEGIN SELECT RAISE(ABORT, 'web evidence is append-only'); END;
                 CREATE TABLE IF NOT EXISTS budget_reservations(
                     id TEXT PRIMARY KEY,
                     request_id TEXT NOT NULL REFERENCES requests(id),
@@ -391,7 +414,7 @@ class PolicyEngine:
         if not config:
             return ConfigStatus(False, tuple(sorted(set(pending))), tuple(sorted(set(errors))))
 
-        expected_top = {"schema_version", "human", "roles"}
+        expected_top = {"schema_version", "human", "roles"} | ({"web"} if "web" in config else set())
         self._check_keys(config, expected_top, "config", errors)
         if config.get("schema_version") != 1:
             errors.append("config.schema_version: must equal 1")
@@ -427,6 +450,27 @@ class PolicyEngine:
             if role is None and len(profile_names) != len(set(profile_names)):
                 errors.append("config.roles: profile_name values must be unique")
             self._validate_role_root_separation(roles, errors, selected)
+
+        web_roles = roles.values() if isinstance(roles, dict) else ()
+        web_required = any(
+            isinstance(value, dict) and isinstance(value.get("tools"), list)
+            and all(isinstance(tool, str) for tool in value["tools"])
+            and bool(WEB_TOOLS.intersection(value["tools"])) for value in web_roles
+        )
+        if "web" in config or web_required:
+            web = config.get("web")
+            if not isinstance(web, dict):
+                errors.append("config.web: explicit web settings are required for web tools")
+            else:
+                self._check_keys(web, {"provider", "allow_public_web", *WEB_LIMITS}, "config.web", errors)
+                if web.get("provider") != "duckduckgo_html":
+                    errors.append("config.web.provider: must be duckduckgo_html")
+                if web.get("allow_public_web") is not True:
+                    pending.append("config.web.allow_public_web: explicit public web consent is required")
+                for key, (minimum, maximum) in WEB_LIMITS.items():
+                    value = web.get(key)
+                    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+                        errors.append(f"config.web.{key}: must be an integer in {minimum}..{maximum}")
 
         return ConfigStatus(not errors and not pending, tuple(sorted(set(pending))), tuple(sorted(set(errors))))
 
@@ -498,6 +542,8 @@ class PolicyEngine:
                     errors.append(f"{label}.tools: workers cannot dispatch")
                 if role_id == "auditor" and "write_artifact" in tools:
                     errors.append(f"{label}.tools: auditor cannot alter original artifacts")
+                if role_id != "researcher" and WEB_TOOLS.intersection(tools):
+                    errors.append(f"{label}.tools: public web tools are limited to the researcher")
 
         for field in ("read_roots", "write_roots"):
             roots = value.get(field)
@@ -536,8 +582,15 @@ class PolicyEngine:
         if domains is not None:
             if not self._valid_string_list(domains) and domains != []:
                 errors.append(f"{label}.external_domains: must be a unique domain array")
-            elif any(not _DOMAIN.fullmatch(item.lower()) for item in domains):
+            elif any(item != "*" and not _DOMAIN.fullmatch(item.lower()) for item in domains):
                 errors.append(f"{label}.external_domains: contains an invalid exact domain")
+            elif "*" in domains and (role_id != "researcher" or len(domains) != 1):
+                errors.append(f"{label}.external_domains: public web wildcard is researcher-only and must stand alone")
+            elif "*" in domains and (
+                not isinstance(self._config.get("web"), dict)
+                or self._config["web"].get("allow_public_web") is not True
+            ):
+                errors.append(f"{label}.external_domains: public web wildcard requires explicit web consent")
 
         limits = value.get("limits")
         if limits is not None:
@@ -1235,6 +1288,21 @@ class PolicyEngine:
         )
 
     def gate(self, request_id: str, *, stage: str, scope: str) -> GateDecision:
+        return self._gate(request_id, stage=stage, scope=scope, require_human_confirmation=True)
+
+    def reviewed_report_gate(self, request_id: str, *, scope: str) -> GateDecision:
+        """Permit delivery of an audited S1 draft, not publication or human acceptance.
+
+        No confirmation records are inserted and the official final gate is unchanged.
+        """
+        request = self.get_request(request_id)
+        if request["scenario"] != "S1":
+            raise PolicyViolation("reviewed report delivery is limited to S1 reports")
+        return self._gate(request_id, stage="final", scope=scope, require_human_confirmation=False)
+
+    def _gate(
+        self, request_id: str, *, stage: str, scope: str, require_human_confirmation: bool
+    ) -> GateDecision:
         if stage not in AUDIT_STAGES:
             raise PolicyViolation("gate stage must be intermediate or final")
         self._require_scope(scope)
@@ -1290,11 +1358,59 @@ class PolicyEngine:
                 for required_stage in stages:
                     if not self._audit_passes(connection, row, required_stage):
                         reasons.append(f"{label}: missing current {required_stage} audit pass")
-                if stage == "final":
+                if stage == "final" and require_human_confirmation:
                     for kind in FINAL_CONFIRMATIONS.get(request["scenario"], ()):
                         if not self._confirmation_passes(connection, row, kind):
                             reasons.append(f"{label}: missing current {kind}")
             return GateDecision("pass" if not reasons else "hold", tuple(reasons), refs)
+
+    def authorize_web(self, request_id: str, task_id: str, role: str, tool: str) -> dict[str, Any]:
+        """Bind every web action to the active researcher's assigned task."""
+        selected = self.require_ready(role)
+        if role != "researcher" or tool not in WEB_TOOLS or tool not in selected["tools"]:
+            raise PolicyViolation("role is not authorized for this web tool")
+        with self._connection() as connection:
+            self._request_row(connection, request_id)
+            task = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if task is None or task["request_id"] != request_id or task["target_role"] != role:
+                raise PolicyViolation("web action must belong to the assigned researcher task")
+        if not selected["external_domains"]:
+            raise PolicyViolation("web action has no permitted external domains")
+        result = copy.deepcopy(self._config["web"])
+        result["allowed_domains"] = list(selected["external_domains"])
+        result["timeout_seconds"] = min(
+            result["timeout_seconds"], int(selected["limits"]["per_call_timeout_seconds"])
+        )
+        if result["timeout_seconds"] < 1:
+            raise PolicyViolation("web action has no positive timeout allowance")
+        return result
+
+    def record_web_evidence(
+        self, request_id: str, task_id: str, role: str, tool: str, result: Mapping[str, Any]
+    ) -> str:
+        self.authorize_web(request_id, task_id, role, tool)
+        encoded = _canonical_json(dict(result))
+        if len(encoded.encode("utf-8")) > 2_000_000:
+            raise PolicyViolation("web evidence exceeds the bounded storage size")
+        evidence_id = _utc_id("web")
+        with self._tx() as connection:
+            self._request_row(connection, request_id)
+            connection.execute(
+                """INSERT INTO web_evidence(id,request_id,task_id,role,tool,result_json,result_sha256)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (evidence_id, request_id, task_id, role, tool, encoded, _sha256_bytes(encoded.encode("utf-8"))),
+            )
+        return evidence_id
+
+    def list_web_evidence(self, request_id: str, *, task_id: str | None = None) -> list[dict[str, Any]]:
+        self.get_request(request_id)
+        with self._connection() as connection:
+            clause = " AND task_id=?" if task_id is not None else ""
+            args = (request_id, task_id) if task_id is not None else (request_id,)
+            rows = connection.execute(
+                "SELECT * FROM web_evidence WHERE request_id=?" + clause + " ORDER BY sequence", args
+            ).fetchall()
+        return [{**dict(row), "result": json.loads(row["result_json"])} for row in rows]
 
     @staticmethod
     def _row_ref(row: sqlite3.Row) -> ArtifactRef:

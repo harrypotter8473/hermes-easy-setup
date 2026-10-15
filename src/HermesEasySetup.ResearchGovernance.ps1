@@ -58,7 +58,9 @@ function ConvertFrom-HermesResearchPolicyJson {
     param([Parameter(Mandatory = $true)][string]$Json)
     if ($Json.Length -gt 262144) { throw 'ResearchPolicyTooLarge' }
     try { $value = $Json | ConvertFrom-Json -ErrorAction Stop } catch { throw '운영 설정 JSON 문법을 확인하세요.' }
-    Assert-HermesResearchPolicyFields $value @('schema_version','human','roles') -Label '운영 설정'
+    $topFields = @('schema_version','human','roles')
+    if ($value.PSObject.Properties['web']) { $topFields += 'web' }
+    Assert-HermesResearchPolicyFields $value $topFields -Label '운영 설정'
     if ($value.schema_version -ne 1) { throw 'ResearchPolicySchemaRejected' }
     Assert-HermesResearchPolicyFields $value.human @('allowed_user_ids') -Label '연구자 설정'
     Assert-HermesResearchPolicyFields $value.roles @('manager','researcher','analyst','auditor') -Label '역할별 운영 설정'
@@ -88,13 +90,27 @@ function Protect-HermesResearchPrivateDirectory {
         $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
         $acl.AddAccessRule($rule)
     }
-    Set-Acl -LiteralPath $LiteralPath -AclObject $acl -ErrorAction Stop
+    # Replace only the DACL. A brand-new descriptor passed to Set-Acl can
+    # request owner/SACL writes and SeSecurityPrivilege on an existing folder.
+    # Preserve those sections so a normal current-user install remains possible.
+    $section = [Security.AccessControl.AccessControlSections]::Access
+    $directory = New-Object IO.DirectoryInfo($LiteralPath)
+    $existing = $(if ($PSVersionTable.PSVersion.Major -ge 6) { [IO.FileSystemAclExtensions]::GetAccessControl($directory, $section) } else { $directory.GetAccessControl($section) })
+    $rules = @($existing.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+    $correct = $existing.AreAccessRulesProtected -and $rules.Count -eq 2 -and @($rules | Where-Object {
+        $_.IdentityReference.Value -cnotin @($OwnerSID,'S-1-5-18') -or $_.AccessControlType -ne 'Allow' -or
+        $_.FileSystemRights -ne 'FullControl' -or $_.InheritanceFlags -ne 'ContainerInherit, ObjectInherit' -or $_.PropagationFlags -ne 'None'
+    }).Count -eq 0
+    if ($correct) { return }
+    $existing.SetSecurityDescriptorSddlForm($acl.GetSecurityDescriptorSddlForm($section), $section)
+    if ($PSVersionTable.PSVersion.Major -ge 6) { [IO.FileSystemAclExtensions]::SetAccessControl($directory,$existing) }
+    else { $directory.SetAccessControl($existing) }
 }
 
 function Install-HermesResearchBrokerFiles {
     param([string]$ResearchRoot)
     $source = Join-Path (Split-Path -Parent $PSScriptRoot) 'engine\research_team'
-    $files = @('__init__.py','policy.py','broker.py','hermes_worker.py')
+    $files = @('__init__.py','policy.py','broker.py','hermes_worker.py','workflow.py','web_tools.py','native_cutover.py','profile_config.py','report_docx.py')
     foreach ($name in $files) {
         $from = Join-Path $source $name
         $to = Join-Path $ResearchRoot ('engine\research_team\' + $name)
@@ -129,9 +145,26 @@ function Register-HermesResearchBrokerTask {
     Register-ScheduledTask -TaskName $Plan.TaskName -TaskPath '\' -InputObject $task -Force:($existing.Count -eq 1) -ErrorAction Stop | Out-Null
 }
 
+function Get-HermesResearchPythonProcessPath {
+    param([string]$Python)
+    # Windows venv python.exe is a launcher. Its child process MainModule is
+    # the base interpreter, not the launcher's path. Ask that exact interpreter
+    # for its OS module path instead of trusting arbitrary heartbeat metadata.
+    $program = 'import ctypes,sys; b=ctypes.create_unicode_buffer(32768); n=ctypes.windll.kernel32.GetModuleFileNameW(None,b,len(b)); print(b.value if n else ""); sys.exit(0 if n else 1)'
+    $probe = Invoke-HermesProcess -FilePath $Python -ArgumentList @('-I','-S','-B','-c',$program) -Environment @{ PYTHONHOME=''; PYTHONPATH=''; PYTHONUSERBASE=''; PYTHONSTARTUP='' } -TimeoutSeconds 15
+    if (-not $probe.Started -or $probe.TimedOut -or $probe.ExitCode -ne 0) { throw 'ResearchPythonIdentityProbeFailed' }
+    $physical = $probe.StdOut.Trim()
+    # A verified Hermes venv may use uv's junction-backed base interpreter.
+    # This is the OS path returned by the selected process, not an input path
+    # to read/write or a value supplied by the heartbeat file.
+    if (-not [IO.Path]::IsPathRooted($physical) -or $physical.StartsWith('\\') -or -not (Test-Path -LiteralPath $physical -PathType Leaf)) { throw 'ResearchPythonIdentityRejected' }
+    return [IO.Path]::GetFullPath($physical)
+}
+
 function Wait-HermesResearchBrokerReady {
     param([string]$ResearchRoot, [string]$Python, [double]$StartedAt, [int]$TimeoutSeconds = 30)
     $path = Join-Path $ResearchRoot 'broker-status.json'
+    $processPath = Get-HermesResearchPythonProcessPath -Python $Python
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         if ((Test-HermesSafeTargetPath -LiteralPath $path).Safe -and (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -139,7 +172,7 @@ function Wait-HermesResearchBrokerReady {
                 $status = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8) | ConvertFrom-Json
                 if ($status.prompts_verified -eq $true -and @($status.errors).Count -eq 0 -and [double]$status.updated_at -ge $StartedAt -and [int]$status.pid -gt 0) {
                     $process = [Diagnostics.Process]::GetProcessById([int]$status.pid)
-                    if (-not $process.HasExited -and [string]::Equals([string]$process.MainModule.FileName, $Python, [StringComparison]::OrdinalIgnoreCase)) { return $status }
+                    if (-not $process.HasExited -and [string]::Equals([string]$process.MainModule.FileName, $processPath, [StringComparison]::OrdinalIgnoreCase)) { return $status }
                 }
             } catch { }
         }
@@ -156,19 +189,20 @@ function Invoke-HermesGovernedResearchSetup {
     $runtimeKind = $(if ($UseExistingHermes) { 'Existing' } else { 'Pinned' })
     $prior = $null
     $priorHash = $null
+    $options = $(if ($InputObject.PSObject.Properties['WizardOptions']) { $InputObject.WizardOptions } else { $null })
+    $migrationConsent = $null -ne $options -and $options.MigrationConsent -eq $true
+    $migrationBackup = $null
     if (Test-Path -LiteralPath $statePath) {
         if (-not $ReuseExistingProfiles) { throw '기존 연구팀은 명시적으로 재설정을 선택하세요.' }
         try {
             if (-not (Test-HermesSafeTargetPath -LiteralPath $statePath).Safe) { throw 'Unsafe' }
             $prior = [IO.File]::ReadAllText($statePath, [Text.Encoding]::UTF8) | ConvertFrom-Json
             $priorHash = ConvertTo-HermesSha256 -LiteralPath $statePath
-            if ($prior.SchemaVersion -ne 1 -or $prior.Manager -cne 'HermesEasySetup.Research.v1' -or $prior.OwnerSID -cne $owner -or $prior.TeamID -cnotmatch '^[a-f0-9]{32}$' -or $prior.RuntimeKind -cne $runtimeKind -or
+            if ($prior.SchemaVersion -ne 1 -or $prior.Manager -cne 'HermesEasySetup.Research.v1' -or $prior.OwnerSID -cne $owner -or $prior.TeamID -cnotmatch '^[a-f0-9]{32}$' -or ($prior.PSObject.Properties['RuntimeKind'] -and $prior.RuntimeKind -cne $runtimeKind) -or
                 $prior.HermesHome -ine $Paths.HermesHome -or $prior.InstallDir -ine $Paths.InstallDir -or $prior.RuntimeRoot -ine $Paths.RuntimeRoot -or
                 $prior.ServerURL -cne $InputObject.ServerURL.TrimEnd('/') -or $prior.HomeChannelID -cne $InputObject.HomeChannelID -or @($prior.Profiles).Count -ne 4) { throw 'ForeignTeam' }
-            # A legacy native gateway must never run alongside the broker. Do not
-            # stop or replace it automatically, even if it is wizard-owned.
-            if (-not $prior.PSObject.Properties['ExecutionMode'] -or $prior.ExecutionMode -cne 'GovernedBroker') { throw 'LegacyTeamRequiresExplicitMigration' }
-        } catch { throw '기존 연구팀 소유권 또는 운영 방식이 다릅니다. 기존 Gateway를 자동 변경하지 않습니다. 별도 전환 확인이 필요합니다.' }
+        } catch { throw '기존 연구팀 소유권·프로필·봇 연결이 다릅니다. 해당 기록은 변경하지 않았습니다.' }
+        if (-not $migrationConsent) { throw '기존 네 봇 전환 동의를 선택하세요. 기록을 유지하고 이 팀의 기존 응답 서비스만 전환합니다.' }
     }
     $manifest = Get-HermesResearchPersonaManifest
     $python = $(if ($UseExistingHermes) { [string]$Runtime.Python } else { Join-Path $Paths.InstallDir 'venv\Scripts\python.exe' })
@@ -180,7 +214,7 @@ function Invoke-HermesGovernedResearchSetup {
     if ($tasks.Count -gt 1) { throw 'ResearchBrokerTaskCollision' }
     if ($tasks.Count -eq 1) {
         Assert-HermesResearchOwnedTask -Task $tasks[0] -Plan $plan -HasOwnership $ownedTask
-        if ([string]$tasks[0].State -eq 'Running') { throw '연구팀 서비스 실행 중에는 프로필·정책을 덮어쓰지 않습니다. 해당 서비스만 중지한 뒤 재설정하세요.' }
+        if ([string]$tasks[0].State -eq 'Running' -and -not $migrationConsent) { throw '실행 중인 연구팀 전환 동의가 필요합니다.' }
     }
     $profileOwnership = @{}
     foreach ($agent in @($InputObject.Agents)) {
@@ -189,18 +223,40 @@ function Invoke-HermesGovernedResearchSetup {
         $previous = @($(if ($null -ne $prior) { $prior.Profiles }) | Where-Object { $null -ne $_ -and $_.ProfileName -ceq $agent.ProfileName -and $_.BotUserID -ceq $identity.BotUserID -and $_.OwnsProfile -eq $true })
         $profileOwnership[[string]$agent.ProfileName] = ($previous.Count -eq 1 -and [bool]$ReuseExistingProfiles)
         if ((Test-Path -LiteralPath $dir) -and ($previous.Count -ne 1 -or -not $ReuseExistingProfiles)) { throw '다른 기존 프로필은 변경하지 않습니다.' }
-        foreach ($target in @($dir, (Join-Path $dir '.env'), (Join-Path $dir 'SOUL.md'), (Join-Path $dir 'config.yaml'))) {
+        foreach ($target in @($dir, (Join-Path $dir '.env'), (Join-Path $dir 'SOUL.md'), (Join-Path $dir 'config.yaml'), (Join-Path $dir 'gateway.parked'))) {
             if (-not (Test-HermesSafeTargetPath -LiteralPath $target).Safe) { throw 'ResearchProfilePathRejected' }
         }
+    }
+    $migrationTasks = @()
+    if ($null -ne $prior) { $migrationTasks = @(Get-HermesResearchMigrationTasks -Prior $prior -Paths $Paths -BrokerPlan $plan) }
+    $environment = $(if ($UseExistingHermes) { $Runtime.Environment } else { New-HermesResearchEnvironment -HermesHome $Paths.HermesHome -InstallDir $Paths.InstallDir })
+    $wizardPolicy = $null
+    if ($null -ne $options) {
+        $null = Assert-HermesResearchWizardOptions -Options $options -RuntimeRoot $Paths.RuntimeRoot
+        $workspace = [IO.Path]::GetFullPath([string]$options.WorkspacePath)
+        foreach ($protected in @($Paths.HermesHome,$Paths.InstallDir,$Paths.RuntimeRoot)) {
+            if ($workspace -ieq $protected -or (Test-HermesPathContains -ParentPath $protected -ChildPath $workspace) -or (Test-HermesPathContains -ParentPath $workspace -ChildPath $protected)) { throw '작업 폴더는 Hermes 설치·인증·운영 설정 폴더와 분리하세요.' }
+        }
+        if (-not (Test-HermesSafeTargetPath -LiteralPath (Join-Path $workspace 'inputs')).Safe) { throw 'ResearchWorkspacePathRejected' }
+        $humanID = Resolve-HermesResearchHuman -InputObject $InputObject
+        $wizardPolicy = New-HermesResearchWizardPolicy -RuntimeRoot $Paths.RuntimeRoot -Options $options -ModelName $InputObject.ModelName -AllowedUserIDs @($humanID) -Agents $InputObject.Agents -Roles $InputObject.Roles
+        New-Item -ItemType Directory -Path (Join-Path $workspace 'inputs') -Force | Out-Null
     }
     Protect-HermesResearchPrivateDirectory -LiteralPath $root -OwnerSID $owner
     $lock = $null
     try {
         $lock = [IO.File]::Open((Join-Path $root 'team.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         if (($null -eq $prior -and (Test-Path -LiteralPath $statePath)) -or ($null -ne $prior -and (-not (Test-Path -LiteralPath $statePath) -or (ConvertTo-HermesSha256 -LiteralPath $statePath) -cne $priorHash))) { throw '사전 검사 이후 연구팀 상태가 바뀌었습니다. 다시 확인하세요.' }
+        if ($null -ne $prior) {
+            $brokerIdentity = Enter-HermesResearchMaintenance -ResearchRoot $root -Tasks $migrationTasks -BrokerPlan $plan -Python $python
+            Assert-HermesResearchBrokerIdle -ResearchRoot $root -Python $python -Environment $environment
+            $migrationBackup = Backup-HermesResearchMigration -Paths $Paths -Prior $prior -Tasks $migrationTasks
+            Publish-HermesResearchStage $ProgressCallback 'research-migration' '기존 네 봇 설정을 백업했습니다. 대화·산출물 기록은 보존하고 기존 연구 서비스만 전환합니다.' 12
+            Stop-HermesResearchMigrationTasks -Tasks $migrationTasks -BrokerIdentity $brokerIdentity
+        }
         Install-HermesResearchBrokerFiles -ResearchRoot $root
         $policyPath = Get-HermesResearchPolicyPath $Paths.RuntimeRoot
-        $policy = $(if (Test-Path -LiteralPath $policyPath) { Get-HermesResearchPolicy -RuntimeRoot $Paths.RuntimeRoot } else { New-HermesResearchPolicy -RuntimeRoot $Paths.RuntimeRoot -ModelName $InputObject.ModelName -Agents $InputObject.Agents -Roles $InputObject.Roles })
+        $policy = $(if ($null -ne $wizardPolicy) { $wizardPolicy } elseif (Test-Path -LiteralPath $policyPath) { Get-HermesResearchPolicy -RuntimeRoot $Paths.RuntimeRoot } else { New-HermesResearchPolicy -RuntimeRoot $Paths.RuntimeRoot -ModelName $InputObject.ModelName -Agents $InputObject.Agents -Roles $InputObject.Roles })
         $publicPolicyJson = $policy | ConvertTo-Json -Depth 15
         foreach ($agent in @($InputObject.Agents)) { if ($publicPolicyJson.Contains([string]$agent.BotToken)) { throw '운영 정책에 봇 토큰을 저장할 수 없습니다. 정책 파일을 확인하세요.' } }
         $template = New-HermesResearchPolicy -RuntimeRoot $Paths.RuntimeRoot -ModelName $InputObject.ModelName -Agents $InputObject.Agents -Roles $InputObject.Roles
@@ -238,9 +294,18 @@ function Invoke-HermesGovernedResearchSetup {
             $binding = $template.roles[[string]$persona.CanonicalName]
             $profiles.Add([pscustomobject]@{ ProfileName = [string]$agent.ProfileName; DisplayName = [string]$agent.DisplayName; RoleId = [string]$agent.RoleId; CanonicalRole = [string]$persona.CanonicalName; BotUserID = [string]$identity.BotUserID; GatewayTask = $plan.TaskName; OwnsProfile = [bool]$profileOwnership[[string]$agent.ProfileName]; Status = 'Pending'; ErrorCode = $null; SystemInstructionsPath = (Join-Path $profileDir 'SOUL.md'); PromptPath = [string]$binding.prompt_path; PromptSha256 = [string]$binding.prompt_sha256 })
         }
-        $state = [pscustomobject]@{ SchemaVersion = 1; Manager = 'HermesEasySetup.Research.v1'; ExecutionMode = 'GovernedBroker'; PersonaSourceVersion = $manifest.SourceVersion; RuntimeKind = $runtimeKind; OwnerSID = $owner; TeamID = $teamID; HermesHome = $Paths.HermesHome; InstallDir = $Paths.InstallDir; RuntimeRoot = $Paths.RuntimeRoot; ServerURL = $InputObject.ServerURL.TrimEnd('/'); HomeChannelID = $InputObject.HomeChannelID; ModelName = $InputObject.ModelName; UpdatedAt = ''; Profiles = $profiles.ToArray() }
+        $state = [pscustomobject]@{ SchemaVersion = 1; Manager = 'HermesEasySetup.Research.v1'; ExecutionMode = 'GovernedBroker'; PersonaSourceVersion = $manifest.SourceVersion; RuntimeKind = $runtimeKind; OwnerSID = $owner; TeamID = $teamID; HermesHome = $Paths.HermesHome; InstallDir = $Paths.InstallDir; RuntimeRoot = $Paths.RuntimeRoot; ServerURL = $InputObject.ServerURL.TrimEnd('/'); HomeChannelID = $InputObject.HomeChannelID; ModelName = $InputObject.ModelName; WizardOptions = $options; MigrationBackupPath = $migrationBackup; UpdatedAt = ''; Profiles = $profiles.ToArray() }
         Save-HermesResearchTeamState -State $state -LiteralPath $statePath
         $privateBots = [ordered]@{}
+        foreach ($persona in @($manifest.Personas)) {
+            $agent = @($InputObject.Agents | Where-Object { $_.RoleId -ceq $persona.LegacyRoleId })[0]
+            $identity = @($Identities | Where-Object { $_.ProfileName -ceq $agent.ProfileName })[0]
+            $privateBots[[string]$persona.CanonicalName] = @{ token = [string]$agent.BotToken; user_id = [string]$identity.BotUserID; username = [string]$identity.BotUsername; display_name = [string]$agent.DisplayName }
+        }
+        # Persist all verified connections in the private ACL-protected store
+        # before clearing native tokens, so interrupted migration can resume.
+        $service = @{ schema_version = 1; hermes_home = $Paths.HermesHome; install_dir = $Paths.InstallDir; python = $python; server_url = $InputObject.ServerURL.TrimEnd('/'); channel_id = $InputObject.HomeChannelID; bots = $privateBots; messaging = @{ reply_in_thread = $true; bot_replies_require_mention = $true; bot_observers = @('manager') } }
+        Write-HermesResearchAtomicText -LiteralPath (Join-Path $root 'private.json') -Text ($service | ConvertTo-Json -Depth 8)
         $completedRoleCount = 0
         $environment = $(if ($UseExistingHermes) { $Runtime.Environment } else { New-HermesResearchEnvironment -HermesHome $Paths.HermesHome -InstallDir $Paths.InstallDir })
         foreach ($persona in @($manifest.Personas)) {
@@ -266,28 +331,41 @@ function Invoke-HermesGovernedResearchSetup {
             # No native messaging token: a running root multiplexer cannot serve
             # these bots outside the policy broker or consume their model budget.
             Set-HermesResearchEnvFile -LiteralPath (Join-Path $profileDir '.env') -Values @{ MATTERMOST_TOKEN = ''; MATTERMOST_URL = '' }
-            foreach ($platform in @('mattermost','telegram','discord','slack','whatsapp','signal','matrix','email','sms','homeassistant','dingtalk','feishu','wecom','wecom_callback','weixin','bluebubbles','qqbot','yuanbao','relay')) {
-                Invoke-HermesResearchCommand -CommandPath $CommandPath -Arguments @('-p',$record.ProfileName,'config','set',('platforms.' + $platform + '.enabled'),'false') -Environment $environment
-            }
-            $privateBots[$name] = @{ token = [string]$agent.BotToken; user_id = [string]$identity.BotUserID; username = [string]$identity.BotUsername; display_name = [string]$agent.DisplayName }
+            # Official modern Hermes parking marker keeps the selected profiles
+            # out of a live root multiplexer and survives its later restart.
+            Write-HermesResearchAtomicText -LiteralPath (Join-Path $profileDir 'gateway.parked') -Text 'Managed by the research workflow broker.'
+            # One isolated roundtrip edit preserves unrelated YAML settings and
+            # avoids starting the full native runtime once per platform.
+            $isolation = Invoke-HermesProcess -FilePath $python -ArgumentList @('-I','-S','-B',(Join-Path $root 'engine\research_team\profile_config.py'),'--source',$Paths.InstallDir,'--profile',$profileDir) -Environment $environment -TimeoutSeconds 30
+            if (-not $isolation.Started -or $isolation.TimedOut -or $isolation.ExitCode -ne 0) { throw 'ResearchNativeProfileIsolationFailed' }
+            try { $isolated = $isolation.StdOut.Trim() | ConvertFrom-Json } catch { throw 'ResearchNativeProfileIsolationResponseRejected' }
+            if ($isolated.isolated -ne $true -or [int]$isolated.platforms_disabled -lt 19) { throw 'ResearchNativeProfileIsolationIncomplete' }
             $record.Status = 'Configured'
             $completedRoleCount++
             Save-HermesResearchTeamState -State $state -LiteralPath $statePath
         }
         $null = Save-HermesResearchPolicy -RuntimeRoot $Paths.RuntimeRoot -Json ($policy | ConvertTo-Json -Depth 15)
-        $service = @{ schema_version = 1; hermes_home = $Paths.HermesHome; install_dir = $Paths.InstallDir; python = $python; server_url = $InputObject.ServerURL.TrimEnd('/'); channel_id = $InputObject.HomeChannelID; bots = $privateBots; messaging = @{ reply_in_thread = $true; bot_replies_require_mention = $true; bot_observers = @('manager') } }
-        Write-HermesResearchAtomicText -LiteralPath (Join-Path $root 'private.json') -Text ($service | ConvertTo-Json -Depth 8)
         Save-HermesResearchTeamState -State $state -LiteralPath $statePath
+        if ($null -ne $prior) { Confirm-HermesResearchNativeDetached -Paths $Paths -Python $python -Environment $environment -ProfileNames @($InputObject.Agents | ForEach-Object { $_.ProfileName }) }
         $check = Invoke-HermesProcess -FilePath $python -ArgumentList @('-I','-S','-B',(Join-Path $root 'engine\research_team\broker.py'),'check','--root',$root) -Environment $environment -TimeoutSeconds 30
         if (-not $check.Started -or $check.TimedOut -or $check.ExitCode -ne 0) { throw 'ResearchPolicyRuntimeCheckFailed' }
         try { $status = $check.StdOut.Trim() | ConvertFrom-Json } catch { throw 'ResearchPolicyCheckResponseRejected' }
         if ($status.prompts_verified -ne $true -or @($status.errors).Count -gt 0) { throw 'ResearchPersonaHashCheckFailed' }
+        $workflowTest = [pscustomobject]@{ Passed = $false; Live = $false; RequestID = ''; Roles = @(); AuditPassed = $false; EvidencePath = ''; ErrorCode = 'PolicyNotReady' }
+        if ($status.PSObject.Properties['configuration_ready'] -and $status.configuration_ready -eq $true) {
+            Publish-HermesResearchStage $ProgressCallback 'research-live-test' '실제 모델·검색·원문 읽기로 총괄→조사→분석→감사→종합을 검증합니다. 몇 분 걸릴 수 있습니다.' 90
+            $workflowTest = Invoke-HermesResearchLiveTest -ResearchRoot $root -Python $python -Environment $environment -UserID ([string]$policy.human.allowed_user_ids[0])
+        }
         Register-HermesResearchBrokerTask -Plan $plan -Python $python -ResearchRoot $root -HasOwnership $ownedTask
-        Publish-HermesResearchStage $ProgressCallback 'research-policy' '권한·감사 중개 서비스의 실제 실행 상태를 확인합니다. 미정 설정은 보류합니다.' 95
+        Publish-HermesResearchStage $ProgressCallback 'research-policy' '분업 테스트 결과와 연구 서비스의 실행 상태를 확인합니다.' 98
         # Incomplete policy installs safely but does not start model work.
         $startedAt = ([DateTime]::UtcNow - [DateTime]'1970-01-01').TotalSeconds
+        Exit-HermesResearchMaintenance -ResearchRoot $root
         Start-HermesResearchGatewayTask -Plan $plan
         $status = Wait-HermesResearchBrokerReady -ResearchRoot $root -Python $python -StartedAt $startedAt
-        return [pscustomobject]@{ Succeeded = $true; PartialSuccess = $false; ExecutionReady = [bool]$status.ready; ExecutionMode = 'GovernedBroker'; PendingSettings = @($status.pending_reasons); Profiles = $profiles.ToArray(); StatePath = $statePath; PolicyPath = $policyPath; RuntimeKind = $runtimeKind; ExistingGatewayLifecyclePreserved = [bool]$UseExistingHermes; ServerURL = $InputObject.ServerURL; HomeChannelID = $InputObject.HomeChannelID; ModelName = $InputObject.ModelName }
+        $ready = [bool]$status.ready -and $workflowTest.Passed -and $workflowTest.Live
+        $pending = @($status.pending_reasons)
+        if (-not $workflowTest.Passed) { $pending += ('실제 분업 테스트 미통과: ' + $workflowTest.ErrorCode) }
+        return [pscustomobject]@{ Succeeded = $ready; PartialSuccess = -not $ready; ExecutionReady = $ready; WorkflowTest = $workflowTest; ExecutionMode = 'GovernedBroker'; PendingSettings = $pending; Profiles = $profiles.ToArray(); StatePath = $statePath; PolicyPath = $policyPath; MigrationBackupPath = $migrationBackup; RuntimeKind = $runtimeKind; ExistingGatewayLifecyclePreserved = [bool]$UseExistingHermes; ServerURL = $InputObject.ServerURL; HomeChannelID = $InputObject.HomeChannelID; ModelName = $InputObject.ModelName }
     } finally { if ($null -ne $lock) { $lock.Dispose() } }
 }
