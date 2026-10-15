@@ -280,6 +280,81 @@ try {
     $installEngineModulePath = (Resolve-Path -LiteralPath (Join-Path $projectRoot 'src\HermesEasySetup.InstallEngine.psm1')).Path
     $installEngineModule = Get-Module | Where-Object { [string]::Equals([string]$_.Path, $installEngineModulePath, [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
     Assert-True ($null -ne $installEngineModule) 'InstallEngine module context is available for private resolver tests'
+    $earlyInstallFailure = & $installEngineModule {
+        param($root)
+
+        $functionNames = @(
+            'Get-HermesDefaultPaths', 'Get-HermesSourceConfig', 'New-HermesInstallPlan', 'Publish-HermesEvent',
+            'Get-HermesPreflight', 'Get-HermesVerificationGitPath', 'Test-HermesRegistryGitResolution',
+            'Get-HermesTrustedGitBashPath', 'Test-HermesTrustedGitBashCompatibility',
+            'Assert-HermesFreshManagedCommandSeed', 'Get-HermesPathStageEnvironmentSnapshot',
+            'Write-HermesEasySetupLog', 'Enter-HermesInstallLock', 'Read-HermesInstallState',
+            'Invoke-HermesExposureRollback', 'Exit-HermesInstallLock'
+        )
+        $originalFunctions = @{}
+        foreach ($functionName in $functionNames) {
+            $originalFunctions[$functionName] = (Get-Command $functionName -CommandType Function).ScriptBlock
+        }
+
+        $script:HermesTestEarlyPaths = [pscustomobject]@{
+            HermesHome = (Join-Path $root 'early-failure-home')
+            InstallDir = (Join-Path $root 'early-failure-home\hermes-agent')
+            RuntimeRoot = (Join-Path $root 'early-failure-runtime')
+            LogDir = (Join-Path $root 'early-failure-runtime\logs')
+            StateDir = (Join-Path $root 'early-failure-runtime\state')
+            StateFile = (Join-Path $root 'early-failure-runtime\state\install-state.json')
+        }
+        $script:HermesTestEarlyPlan = [pscustomobject]@{
+            Fingerprint = ('A' * 64)
+            SourceTag = 'v-test'
+            SourceCommit = ('b' * 40)
+            HermesHome = $script:HermesTestEarlyPaths.HermesHome
+            InstallDir = $script:HermesTestEarlyPaths.InstallDir
+            RuntimeRoot = $script:HermesTestEarlyPaths.RuntimeRoot
+        }
+        $script:HermesTestEarlyRollbackPlan = $null
+
+        try {
+            Set-Item -Path 'Function:script:Get-HermesDefaultPaths' -Value { param($HermesHome, $InstallDir, $RuntimeRoot) return $script:HermesTestEarlyPaths }
+            Set-Item -Path 'Function:script:Get-HermesSourceConfig' -Value { param($LiteralPath) return [pscustomobject]@{ hermes = [pscustomobject]@{ commitSha = ('b' * 40) }; installer = [pscustomobject]@{ sha256 = ('c' * 64) } } }
+            Set-Item -Path 'Function:script:New-HermesInstallPlan' -Value { param($HermesHome, $InstallDir, $RuntimeRoot, $IncludeDesktop, $SkipComputerUse, $SetupMode, $SourceConfigPath) return $script:HermesTestEarlyPlan }
+            Set-Item -Path 'Function:script:Publish-HermesEvent' -Value { param($Callback, $Type, $Stage, $State, $Message, $Percent, $Data) }
+            Set-Item -Path 'Function:script:Get-HermesPreflight' -Value { param($HermesHome, $InstallDir, $RuntimeRoot, $IncludeDesktop) return [pscustomobject]@{ Ready = $true; ExistingCheckout = $true } }
+            Set-Item -Path 'Function:script:Get-HermesVerificationGitPath' -Value { param($HermesHome) return 'C:\Program Files\Git\cmd\git.exe' }
+            Set-Item -Path 'Function:script:Test-HermesRegistryGitResolution' -Value { param($TrustedGitPath, $PathValues) return [pscustomobject]@{ Valid = $true; ResolvedPath = $TrustedGitPath } }
+            Set-Item -Path 'Function:script:Get-HermesTrustedGitBashPath' -Value { param($TrustedGitPath) return 'C:\Program Files\Git\bin\bash.exe' }
+            Set-Item -Path 'Function:script:Test-HermesTrustedGitBashCompatibility' -Value { param($BashPath) return $true }
+            Set-Item -Path 'Function:script:Assert-HermesFreshManagedCommandSeed' -Value { param($Plan, $PathValues) }
+            Set-Item -Path 'Function:script:Get-HermesPathStageEnvironmentSnapshot' -Value { param($Plan, $TrustedGitBashPath) return [pscustomobject]@{ Captured = $true } }
+            Set-Item -Path 'Function:script:Write-HermesEasySetupLog' -Value { param($LiteralPath, $Message, $Level) }
+            Set-Item -Path 'Function:script:Enter-HermesInstallLock' -Value { param($RuntimeRoot) return [pscustomobject]@{ TestLock = $true } }
+            Set-Item -Path 'Function:script:Read-HermesInstallState' -Value { param($LiteralPath) return $null }
+            Set-Item -Path 'Function:script:Invoke-HermesExposureRollback' -Value {
+                param($Snapshot, $Plan, $FreshRepositoryProof, $LauncherExcludeWrite, $LauncherAttestationWrite, $Paths, $LogPath, $Context)
+                $script:HermesTestEarlyRollbackPlan = $Plan
+            }
+            Set-Item -Path 'Function:script:Exit-HermesInstallLock' -Value { param($Lock) }
+
+            $caughtMessage = $null
+            try {
+                Invoke-HermesInstall -HermesHome $script:HermesTestEarlyPaths.HermesHome -InstallDir $script:HermesTestEarlyPaths.InstallDir -RuntimeRoot $script:HermesTestEarlyPaths.RuntimeRoot -SkipComputerUse | Out-Null
+            } catch {
+                $caughtMessage = $_.Exception.Message
+            }
+            return [pscustomobject]@{
+                Message = $caughtMessage
+                RollbackReceivedInitialPlan = ($script:HermesTestEarlyRollbackPlan -eq $script:HermesTestEarlyPlan)
+            }
+        } finally {
+            foreach ($functionName in $functionNames) {
+                Set-Item -Path ('Function:script:' + $functionName) -Value $originalFunctions[$functionName]
+            }
+            Remove-Variable -Scope Script -Name HermesTestEarlyPaths -ErrorAction SilentlyContinue
+            Remove-Variable -Scope Script -Name HermesTestEarlyPlan -ErrorAction SilentlyContinue
+            Remove-Variable -Scope Script -Name HermesTestEarlyRollbackPlan -ErrorAction SilentlyContinue
+        }
+    } $testRootFull
+    Assert-True ([string]$earlyInstallFailure.Message -ceq '기존 checkout은 launcher attestation v1이 있는 실패 상태의 -Resume만 허용합니다. 새 빈 InstallDir에서 다시 설치하세요.' -and [bool]$earlyInstallFailure.RollbackReceivedInitialPlan) 'existing checkout rejection preserves its original error and rolls back with the approved initial plan'
     $signedManagedCandidate = & $installEngineModule { param($path) Test-HermesGitCandidate -LiteralPath $path -RequireValidSignature } $planManagedGit
     Assert-Equal ([System.IO.Path]::GetFullPath($planManagedGit)) $signedManagedCandidate 'signed Git candidate passes leaf validation'
 

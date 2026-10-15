@@ -14,14 +14,16 @@ if ($version -cnotmatch '^\d+\.\d+\.\d+$') { throw 'Invalid distribution version
 $common = @('HermesEasySetup.ps1','VERSION','LICENSE','README.md','SECURITY.md',
     'config/hermes-manifest.json','config/hermes-source.json','config/mattermost-desktop.json','config/mattermost-server.json','config/bot-control.json','config/docker-desktop.json',
     'src/HermesEasySetup.Loader.psm1','src/HermesEasySetup.Core.psm1','src/HermesEasySetup.Preflight.psm1','src/HermesEasySetup.StateStore.psm1',
-    'src/HermesEasySetup.Execution.psm1','src/HermesEasySetup.Protocol.psm1','src/HermesEasySetup.InstallEngine.psm1','src/HermesEasySetup.Codex.psm1',
-    'src/HermesEasySetup.Lab.psm1','src/HermesEasySetup.Mattermost.psm1','src/HermesEasySetup.Docker.psm1','src/HermesEasySetup.Admin.psm1','src/HermesEasySetup.AdminBots.ps1','src/HermesEasySetup.AdminNetwork.ps1','src/HermesEasySetup.Research.psm1','src/HermesEasySetup.ResearchRuntime.psm1','src/HermesEasySetup.Bundle.psm1',
+    'src/HermesEasySetup.Execution.psm1','src/HermesEasySetup.Protocol.psm1','src/HermesEasySetup.InstallEngine.psm1','src/HermesEasySetup.Existing.psm1','src/HermesEasySetup.Codex.psm1',
+    'src/HermesEasySetup.Lab.psm1','src/HermesEasySetup.Mattermost.psm1','src/HermesEasySetup.Docker.psm1','src/HermesEasySetup.Admin.psm1','src/HermesEasySetup.AdminBots.ps1','src/HermesEasySetup.AdminNetwork.ps1','src/HermesEasySetup.Research.psm1','src/HermesEasySetup.ResearchRuntime.psm1','src/HermesEasySetup.ResearchGovernance.ps1','src/HermesEasySetup.Bundle.psm1',
     'docs/installation-guide.ko.md','docs/admin-guide.ko.md','docs/two-pc-checklist.ko.md','docs/recovery-guide.ko.md','docs/admin-step5-validation.ko.md')
 $package = & (Get-Module HermesEasySetup.Admin) { Get-HermesAdminBotControlPackage }
 $roles = @(
     @{ Name = 'User'; Entry = 'Start-HermesEasySetup.cmd'; Files = @('Start-HermesEasySetup.cmd','HermesEasySetup.Gui.ps1','ui/MainWindow.xaml') },
     @{ Name = 'Admin'; Entry = 'Start-HermesAdminSetup.cmd'; Files = @('Start-HermesAdminSetup.cmd','HermesAdminSetup.Gui.ps1','ui/AdminWindow.xaml',('assets/bot-control/' + $package.Pin.file)) },
-    @{ Name = 'Research'; Entry = 'Start-HermesResearchSetup.cmd'; Files = @('Start-HermesResearchSetup.cmd','HermesResearchSetup.Gui.ps1','ui/ResearchWindow.xaml','docs/research-guide.ko.md') }
+    @{ Name = 'Research'; Entry = 'Start-HermesResearchSetup.cmd'; Files = @('Start-HermesResearchSetup.cmd','HermesResearchSetup.Gui.ps1','ui/ResearchWindow.xaml','docs/research-guide.ko.md',
+        'assets/research-prompts/manager.txt','assets/research-prompts/researcher.txt','assets/research-prompts/analyst.txt','assets/research-prompts/auditor.txt',
+        'engine/research_team/__init__.py','engine/research_team/policy.py','engine/research_team/broker.py','engine/research_team/hermes_worker.py') }
 )
 $plans = @()
 foreach ($role in $roles) {

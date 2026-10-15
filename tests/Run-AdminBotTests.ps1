@@ -24,6 +24,20 @@ Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'src\HermesEasySetup
         $record = New-HermesAdminBotRecord $state $data
         $again = New-HermesAdminBotRecord $state $data
         Assert ($record.OperationId -ceq $again.OperationId) 'Retry preserves bot operation ID'
+        # A Prepared Korean record must be safely reusable before any API call or issuance.
+        $unicodeData = $data | ConvertTo-Json | ConvertFrom-Json
+        $unicodeData.BotUsername = 'unicode_bot'; $unicodeData.BotDisplayName = '총괄 에이전트'; $unicodeData.BotDescription = '한글 역할 메타데이터'
+        $unicodeRecord = New-HermesAdminBotRecord $state $unicodeData
+        $unicodePath = Join-Path $state.Directory 'bots\unicode_bot.json'
+        [IO.File]::WriteAllText($unicodePath,($unicodeRecord | ConvertTo-Json -Depth 32),(New-Object Text.UTF8Encoding $false))
+        $unicodeBytes = [IO.File]::ReadAllBytes($unicodePath)
+        Assert (-not ($unicodeBytes[0] -eq 239 -and $unicodeBytes[1] -eq 187 -and $unicodeBytes[2] -eq 191)) 'Korean bot fixture is explicitly UTF-8 without BOM'
+        $unicodeAgain = New-HermesAdminBotRecord $state $unicodeData
+        Assert ($unicodeAgain.OperationId -ceq $unicodeRecord.OperationId) 'Korean Prepared bot retry preserves operation ID'
+        Assert ($unicodeAgain.DisplayName -ceq $unicodeData.BotDisplayName -and $unicodeAgain.Description -ceq $unicodeData.BotDescription) 'Korean bot display name and description survive product metadata reader'
+        Assert ($unicodeAgain.Status -ceq 'Prepared' -and -not $unicodeAgain.CreateAttempted -and -not $unicodeAgain.BotId -and -not $unicodeAgain.TokenId) 'Korean record retry does not issue or adopt a bot or token'
+        $unicodeChanged = $unicodeData | ConvertTo-Json | ConvertFrom-Json; $unicodeChanged.BotDisplayName = '다른 이름'
+        Reject { New-HermesAdminBotRecord $state $unicodeChanged } 'Korean bot display name remains immutable on retry'
         $copy = $data | ConvertTo-Json | ConvertFrom-Json; $copy.BotDisplayName = 'Changed'
         Reject { New-HermesAdminBotRecord $state $copy } 'Existing bot input is immutable'
         $bot = [pscustomobject]@{ user_id = 'b'*26; username = $data.BotUsername; owner_id = $state.AdminUserId; description = ($record.Description + ' ' + (Get-HermesAdminBotMarker $record)); display_name = $data.BotDisplayName; delete_at = 0 }

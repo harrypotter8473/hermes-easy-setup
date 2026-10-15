@@ -41,6 +41,13 @@ try {
     Assert-CliTrue ($guardExit -eq 2 -and [int]$guardError.exit_code -eq 2 -and [string]$guardError.message -like '*-Apply*') 'Install without Apply is default-deny'
     Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) 'Apply guard creates no runtime state'
 
+    foreach ($blockedAction in @('Install', 'CodexAuth')) {
+        $existingGuard = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action $blockedAction -UseExistingHermes -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -Json)
+        $existingError = $existingGuard[-1] | ConvertFrom-Json
+        Assert-CliTrue ($LASTEXITCODE -ne 0 -and $existingError.message -like '*새 로그인은 실행하지 않습니다*') ('Existing runtime mode rejects ' + $blockedAction)
+        Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot) -and -not (Test-Path -LiteralPath $hermesHome)) 'Existing runtime guard creates no install, auth, or state files'
+    }
+
     $dockerGuard = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action DockerInstall -RuntimeRoot $runtimeRoot -Json)
     Assert-CliTrue ($LASTEXITCODE -eq 2 -and ($dockerGuard[-1] | ConvertFrom-Json).message -like '*-Apply*') 'Docker download and install require explicit Apply'
     Assert-CliTrue (-not (Test-Path -LiteralPath $runtimeRoot)) 'Docker consent guard creates no runtime or download cache'

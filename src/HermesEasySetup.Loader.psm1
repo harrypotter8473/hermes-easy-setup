@@ -7,6 +7,7 @@ $modules = @(
     'HermesEasySetup.Execution.psm1',
     'HermesEasySetup.Protocol.psm1',
     'HermesEasySetup.InstallEngine.psm1',
+    'HermesEasySetup.Existing.psm1',
     'HermesEasySetup.Codex.psm1',
     'HermesEasySetup.Lab.psm1',
     'HermesEasySetup.Mattermost.psm1',

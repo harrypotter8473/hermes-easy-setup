@@ -20,7 +20,12 @@ function New-HermesCodexEnvironment {
 
 function Get-HermesCodexRuntime {
     [CmdletBinding()]
-    param([string]$HermesHome, [string]$InstallDir, [string]$RuntimeRoot)
+    param([string]$HermesHome, [string]$InstallDir, [string]$RuntimeRoot, [switch]$UseExistingHermes)
+    if ($UseExistingHermes) {
+        # An explicit trust choice, not a fallback or a forged pinned attestation.
+        $existingPaths = Get-HermesDefaultPaths -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot
+        return (Get-HermesExistingRuntime -HermesHome $existingPaths.HermesHome -InstallDir $existingPaths.InstallDir -RuntimeRoot $existingPaths.RuntimeRoot)
+    }
     $paths = Get-HermesDefaultPaths -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot
     $verificationLog = Join-Path ([System.IO.Path]::GetTempPath()) ('hermes-easy-setup-codex-verify-' + [guid]::NewGuid().ToString('N') + '.log')
     try {
@@ -35,7 +40,26 @@ function Get-HermesCodexRuntime {
         if (Test-Path -LiteralPath $verificationLog -PathType Leaf) { Remove-Item -LiteralPath $verificationLog -Force -ErrorAction SilentlyContinue }
     }
     if (-not $verification.StaticProvenanceValid) {
-        throw "검증된 Hermes 설치가 필요합니다: $(@($verification.FailedChecks) -join ', ')"
+        $installationFound = ([bool]$verification.CheckoutPresent -or [bool]$verification.VenvPythonPresent)
+        $detail = New-Object System.Collections.Generic.List[string]
+        if ($installationFound) {
+            $detail.Add('검증된 Hermes 설치가 필요합니다. Hermes 설치 폴더는 발견했지만, 이 마법사가 요구하는 고정 버전·설치 검증 기록과 일치하지 않습니다. Hermes가 미설치라는 뜻은 아닙니다.')
+        } else {
+            $detail.Add('검증된 Hermes 설치가 필요합니다. 현재 확인 경로에서 검증할 설치를 찾지 못했습니다. 다른 위치에 설치된 Hermes까지 없다는 뜻은 아닙니다.')
+        }
+        $detail.Add("확인 경로: $($paths.InstallDir)")
+        if ([string]$verification.ExpectedCommit -cmatch '^[0-9a-fA-F]{40}$') {
+            $detail.Add("마법사 요구 commit: $($verification.ExpectedCommit)")
+        }
+        if ([string]$verification.MarkerPinnedCommit -cmatch '^[0-9a-fA-F]{40}$') {
+            $detail.Add("설치 기록 commit: $($verification.MarkerPinnedCommit)")
+        }
+        if ($installationFound -and -not [bool]$verification.RepositoryMetadataSafe) {
+            $detail.Add('Git 구조·설정이 이 마법사의 허용 조건과 달라 일부 검사를 진행하지 못했습니다. 아래 항목 모두가 각각 손상되었다는 뜻은 아닙니다.')
+        }
+        $detail.Add('기존 설치가 있으면 삭제하거나 재설치를 강행하지 말고 경로·버전·검증 기록을 먼저 확인하세요. 기존 Hermes 설치는 변경하지 않았습니다.')
+        $detail.Add("통과하지 못했거나 확인하지 못한 검사: $(@($verification.FailedChecks) -join ', ')")
+        throw ($detail -join [Environment]::NewLine)
     }
     $command = Join-Path $paths.InstallDir 'bin\hermes.exe'
     if (-not (Test-Path -LiteralPath $command -PathType Leaf)) { throw 'Hermes 실행 파일을 찾지 못했습니다.' }
@@ -46,6 +70,80 @@ function Get-HermesCodexRuntime {
         Command = $command
         Python = $python
         Environment = New-HermesCodexEnvironment -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir
+    }
+}
+
+function Get-HermesExistingCodexStatus {
+    [CmdletBinding()]
+    param([string]$HermesHome, [string]$InstallDir, [string]$RuntimeRoot)
+    $runtime = Get-HermesCodexRuntime -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot -UseExistingHermes
+    $runtime.Environment['PYTHONDONTWRITEBYTECODE'] = '1'
+    # Do not run `auth add`, copy auth.json, refresh credentials, or pass a token
+    # to model discovery. The probe only emits booleans and model identifiers.
+    # Python's audit hook also blocks attempted writes, subprocesses and sockets
+    # in older Hermes implementations whose status helper is not read-only.
+    $program = @'
+import sys, os, json, re, io, contextlib
+sys.dont_write_bytecode = True
+def readonly_audit(event, args):
+    if event == "open":
+        mode = args[1] if len(args) > 1 else None
+        flags = args[2] if len(args) > 2 else 0
+        if (isinstance(mode, str) and any(c in mode for c in "wax+")) or (isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)):
+            raise PermissionError("HermesExistingReadOnlyProbe:" + event)
+    if event == "os.mkdir" and args and os.path.isdir(args[0]):
+        return
+    if event.startswith(("winreg.", "os.spawn", "os.exec", "os.startfile", "subprocess.")) or event in ("os.mkdir", "os.remove", "os.rename", "os.rmdir", "os.link", "os.symlink", "os.truncate", "os.chmod", "os.utime", "os.chown", "os.system", "socket.__new__", "socket.connect", "socket.bind", "socket.getaddrinfo"):
+        raise PermissionError("HermesExistingReadOnlyProbe:" + event)
+sys.addaudithook(readonly_audit)
+# -I -S prevents .pth/sitecustomize from running before the audit hook.
+# Add only the checked source install and its venv packages, never site.main().
+sys.path.insert(0, os.path.join(os.getcwd(), "venv", "Lib", "site-packages"))
+sys.path.insert(0, os.getcwd())
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    from hermes_cli.auth import resolve_codex_runtime_credentials, AuthError
+    from hermes_cli.codex_models import get_codex_model_ids
+    try:
+        credentials = resolve_codex_runtime_credentials(read_only=True)
+    except AuthError as exc:
+        if getattr(exc, "code", None) != "codex_auth_missing":
+            raise
+        credentials = {}
+    found = bool(credentials.get("api_key"))
+    models = get_codex_model_ids()
+    preferred = ""
+    try:
+        from hermes_cli.config import read_raw_config
+        model = read_raw_config().get("model", {})
+        if isinstance(model, dict) and model.get("provider") == "openai-codex":
+            preferred = model.get("default", "")
+    except PermissionError:
+        raise
+    except Exception:
+        pass
+safe = lambda s: isinstance(s, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{1,127}", s) is not None
+models = list(dict.fromkeys(m for m in models if safe(m)))
+preferred = preferred if safe(preferred) else ""
+if preferred and preferred not in models:
+    models.insert(0, preferred)
+print(json.dumps({"LoggedIn": found, "Models": models, "PreferredModel": preferred}))
+'@
+    $result = Invoke-HermesProcess -FilePath $runtime.Python -ArgumentList @('-I', '-S', '-B', '-c', $program) -WorkingDirectory $runtime.Paths.InstallDir -Environment $runtime.Environment -TimeoutSeconds 45
+    if (-not $result.Started -or $result.TimedOut -or $result.ExitCode -ne 0) {
+        throw '기존 Hermes의 읽기 전용 인증·모델 확인을 완료하지 못했습니다. 인증은 수정하지 않았습니다. 이 설치의 상태 조회 API 호환성을 확인하세요.'
+    }
+    try {
+        $status = $result.StdOut.Trim() | ConvertFrom-Json
+        if ($status.LoggedIn -isnot [bool]) { throw 'InvalidStatus' }
+        $models = @($status.Models | Where-Object { $_ -is [string] -and $_ -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$' } | Select-Object -Unique)
+        if ($models.Count -eq 0 -or $models.Count -ne @($status.Models).Count) { throw 'InvalidModels' }
+        $preferred = [string]$status.PreferredModel
+        if ($preferred -and $models -cnotcontains $preferred) { throw 'InvalidPreferredModel' }
+    } catch { throw '기존 Hermes의 상태 응답을 확인하지 못했습니다. 기존 인증·설정은 변경하지 않았습니다.' }
+    return [pscustomobject][ordered]@{
+        LoggedIn = [bool]$status.LoggedIn; Provider = 'openai-codex'; Models = $models; PreferredModel = $preferred
+        RuntimeKind = 'Existing'; Version = [string]$runtime.Version; ReadOnly = $true
+        Summary = $(if ($status.LoggedIn) { '기존 Hermes와 저장된 Codex 인증을 발견했습니다. 외부 로그인 유효성 검사는 하지 않았으며 인증·기존 설정은 변경하지 않았습니다.' } else { '기존 Hermes는 인식했습니다. 저장된 Codex 인증을 찾지 못했습니다. 기존 Hermes에서 계정 상태를 확인하세요. 새 로그인은 실행하지 않았습니다.' })
     }
 }
 
@@ -64,7 +162,10 @@ function Get-HermesCodexModels {
 
 function Get-HermesCodexStatus {
     [CmdletBinding()]
-    param([string]$HermesHome, [string]$InstallDir, [string]$RuntimeRoot)
+    param([string]$HermesHome, [string]$InstallDir, [string]$RuntimeRoot, [switch]$UseExistingHermes)
+    if ($UseExistingHermes) {
+        return (Get-HermesExistingCodexStatus -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot)
+    }
     $runtime = Get-HermesCodexRuntime -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot
     $result = Invoke-HermesProcess -FilePath $runtime.Command -ArgumentList @('auth', 'status', 'openai-codex') -WorkingDirectory $runtime.Paths.InstallDir -Environment $runtime.Environment -TimeoutSeconds 45
     $text = (($result.StdOut + [Environment]::NewLine + $result.StdErr).Trim())

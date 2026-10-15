@@ -2,6 +2,19 @@
 
 $script:ResearchRoleIds = @('planner', 'researcher', 'executor', 'reviewer')
 $script:ResearchProfiles = @('research-lead', 'research-scout', 'research-worker', 'research-reviewer')
+$script:ResearchPersonaSourceVersion = 'v0.1_20261015'
+$script:ResearchPersonaSpecs = @(
+    [pscustomobject][ordered]@{ CanonicalName = 'manager'; LegacyRoleId = 'planner'; ProfileName = 'research-lead'; DisplayName = '관리'; FileName = 'manager.txt'; Sha256 = 'd8cae97e9d90b1210ff909e025db4a547ff7f8ad2ed45b95d1a4699c84e0c1b7' }
+    [pscustomobject][ordered]@{ CanonicalName = 'researcher'; LegacyRoleId = 'researcher'; ProfileName = 'research-scout'; DisplayName = '조사'; FileName = 'researcher.txt'; Sha256 = '637045d63eb06ea6f8fe04f8f714059b67b93368c3ac13dd78015ce5a82e7582' }
+    [pscustomobject][ordered]@{ CanonicalName = 'analyst'; LegacyRoleId = 'executor'; ProfileName = 'research-worker'; DisplayName = '분석'; FileName = 'analyst.txt'; Sha256 = '8dca29efba1a7671db9445122268874dbdafa2c66e03f455aa512f589bc2409b' }
+    [pscustomobject][ordered]@{ CanonicalName = 'auditor'; LegacyRoleId = 'reviewer'; ProfileName = 'research-reviewer'; DisplayName = '감사'; FileName = 'auditor.txt'; Sha256 = 'ea80c9823ff57d30676f24c71def6f26c40f103f37484a530bc2a86b5a84be3b' }
+)
+$script:ResearchLegacyDefaultRoles = @(
+    [pscustomobject][ordered]@{ Id = 'planner'; Name = '총괄'; Instructions = '연구 목표와 작업 순서를 정리하고 조사·실행·검토 결과를 종합한다. 확인된 근거와 제안을 구분한다.' }
+    [pscustomobject][ordered]@{ Id = 'researcher'; Name = '조사'; Instructions = '관련 자료와 출처를 조사하고 확인한 내용과 불확실한 내용을 구분하여 보고한다.' }
+    [pscustomobject][ordered]@{ Id = 'executor'; Name = '실행'; Instructions = '합의된 연구 계획에 따라 작업을 수행하고 방법·결과·한계를 기록한다. 추가 권한이 필요한 작업은 요청한다.' }
+    [pscustomobject][ordered]@{ Id = 'reviewer'; Name = '검토'; Instructions = '연구 결과의 근거와 재현 가능성을 독립적으로 검토하고 오류·누락·한계를 보고한다.' }
+)
 
 function Assert-HermesResearchFields {
     param($Value, [string[]]$Required, [string[]]$Optional = @(), [string]$Label)
@@ -29,13 +42,61 @@ function Assert-HermesResearchText {
     if ($Value -match $controls) { throw "$Label 허용되지 않은 제어 문자가 있습니다." }
 }
 
+function Get-HermesResearchPersonaManifest {
+    [CmdletBinding()]
+    param()
+    $assetRoot = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $PSScriptRoot) 'assets\research-prompts'))
+    $personas = New-Object System.Collections.Generic.List[object]
+    foreach ($spec in $script:ResearchPersonaSpecs) {
+        $path = [IO.Path]::GetFullPath((Join-Path $assetRoot $spec.FileName))
+        $safe = Test-HermesSafeTargetPath -LiteralPath $path -Label '연구 페르소나 원문'
+        if (-not $safe.Safe -or -not (Test-HermesPathContains -ParentPath $assetRoot -ChildPath $path) -or
+            -not (Test-Path -LiteralPath $path -PathType Leaf)) { throw '연구 페르소나 원문 경로를 안전하게 확인할 수 없습니다.' }
+        $item = Get-Item -LiteralPath $path -Force
+        if ($item.Length -lt 1 -or $item.Length -gt 65536) { throw '연구 페르소나 원문 크기가 허용 범위를 벗어났습니다.' }
+        $actualHash = (ConvertTo-HermesSha256 -LiteralPath $path).ToLowerInvariant()
+        if ($actualHash -cne [string]$spec.Sha256) { throw '연구 페르소나 원문 무결성 검증에 실패했습니다.' }
+        try {
+            $bytes = [IO.File]::ReadAllBytes($path)
+            $text = (New-Object Text.UTF8Encoding($false, $true)).GetString($bytes)
+        } catch { throw '연구 페르소나 원문을 strict UTF-8로 읽을 수 없습니다.' }
+        Assert-HermesResearchText $text 8000 '연구 페르소나 원문' -Multiline
+        $personas.Add([pscustomobject][ordered]@{
+            CanonicalName = [string]$spec.CanonicalName
+            LegacyRoleId = [string]$spec.LegacyRoleId
+            ProfileName = [string]$spec.ProfileName
+            Path = $path
+            Sha256 = $actualHash
+            Text = $text
+        })
+    }
+    return [pscustomobject][ordered]@{
+        SourceVersion = $script:ResearchPersonaSourceVersion
+        Personas = $personas.ToArray()
+    }
+}
+
 function Get-HermesResearchDefaultRoles {
-    return @(
-        [pscustomobject][ordered]@{ Id = 'planner'; Name = '총괄'; Instructions = '연구 목표와 작업 순서를 정리하고 조사·실행·검토 결과를 종합한다. 확인된 근거와 제안을 구분한다.' }
-        [pscustomobject][ordered]@{ Id = 'researcher'; Name = '조사'; Instructions = '관련 자료와 출처를 조사하고 확인한 내용과 불확실한 내용을 구분하여 보고한다.' }
-        [pscustomobject][ordered]@{ Id = 'executor'; Name = '실행'; Instructions = '합의된 연구 계획에 따라 작업을 수행하고 방법·결과·한계를 기록한다. 추가 권한이 필요한 작업은 요청한다.' }
-        [pscustomobject][ordered]@{ Id = 'reviewer'; Name = '검토'; Instructions = '연구 결과의 근거와 재현 가능성을 독립적으로 검토하고 오류·누락·한계를 보고한다.' }
-    )
+    $manifest = Get-HermesResearchPersonaManifest
+    foreach ($persona in @($manifest.Personas)) {
+        $spec = @($script:ResearchPersonaSpecs | Where-Object { $_.CanonicalName -ceq $persona.CanonicalName })[0]
+        [pscustomobject][ordered]@{
+            Id = [string]$persona.LegacyRoleId
+            Name = [string]$spec.DisplayName
+            Instructions = [string]$persona.Text
+        }
+    }
+}
+
+function Test-HermesResearchLegacyDefaultRoles {
+    param($Roles)
+    if (@($Roles).Count -ne 4) { return $false }
+    foreach ($expected in $script:ResearchLegacyDefaultRoles) {
+        $actual = @($Roles | Where-Object { $_.Id -ceq $expected.Id })
+        if ($actual.Count -ne 1 -or $actual[0].Name -cne $expected.Name -or
+            $actual[0].Instructions -cne $expected.Instructions) { return $false }
+    }
+    return $true
 }
 
 function ConvertTo-HermesResearchRoles {
@@ -93,7 +154,11 @@ function Get-HermesResearchRoles {
     catch { throw '역할 설정 JSON을 읽을 수 없습니다. 기존 파일을 보존합니다.' }
     Assert-HermesResearchFields $catalog @('SchemaVersion', 'Roles') -Label '역할 카탈로그'
     Assert-HermesResearchSchemaVersion $catalog.SchemaVersion
-    return ConvertTo-HermesResearchRoles $catalog.Roles
+    $roles = @(ConvertTo-HermesResearchRoles $catalog.Roles)
+    # A catalog containing only the exact former built-ins is an old default,
+    # not a user-authored customization. Migrate in memory and leave the file intact.
+    if (Test-HermesResearchLegacyDefaultRoles -Roles $roles) { return Get-HermesResearchDefaultRoles }
+    return $roles
 }
 
 function Save-HermesResearchRoles {
@@ -201,6 +266,6 @@ function Assert-HermesResearchTeamInput {
 }
 
 Export-ModuleMember -Function @(
-    'Get-HermesResearchRoles', 'Save-HermesResearchRoles',
+    'Get-HermesResearchPersonaManifest', 'Get-HermesResearchRoles', 'Save-HermesResearchRoles',
     'New-HermesResearchDefaultAgents', 'Assert-HermesResearchTeamInput'
 )

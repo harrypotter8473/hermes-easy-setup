@@ -4,6 +4,9 @@ $script:ResearchManager = 'HermesEasySetup.Research.v1'
 $script:ResearchSoulStart = '<!-- HERMES EASY SETUP: MANAGED RESEARCH ROLE START -->'
 $script:ResearchSoulEnd = '<!-- HERMES EASY SETUP: MANAGED RESEARCH ROLE END -->'
 $script:ResearchGatewayReadyTimeoutSeconds = 60
+$script:ResearchExistingGatewayReadyTimeoutSeconds = 75
+
+. (Join-Path $PSScriptRoot 'HermesEasySetup.ResearchGovernance.ps1')
 
 function Publish-HermesResearchStage {
     param([AllowNull()][scriptblock]$Callback, [string]$Stage, [string]$Message, [int]$Percent, [string]$State = 'running')
@@ -27,17 +30,21 @@ function Test-HermesResearchTeamConnection {
     param([Parameter(Mandatory = $true)]$InputObject)
     $identities = New-Object System.Collections.Generic.List[object]
     $seen = @{}
+    $seenNames = @{}
     foreach ($agent in @($InputObject.Agents)) {
         try {
             $me = Invoke-HermesResearchMattermostAPI -ServerURL $InputObject.ServerURL -Path '/api/v4/users/me' -Token $agent.BotToken
             if ($me.is_bot -isnot [bool] -or -not $me.is_bot -or $me.delete_at -ne 0 -or $me.roles -cne 'system_user' -or $me.id -cnotmatch '^[a-z0-9]{26}$') { throw 'InvalidBot' }
+            if ($me.username -isnot [string] -or $me.username -cnotmatch '^[a-z0-9][a-z0-9._-]{0,63}$') { throw 'InvalidBotUsername' }
             if ($seen.ContainsKey([string]$me.id)) { throw 'DuplicateBot' }
+            if ($seenNames.ContainsKey([string]$me.username)) { throw 'DuplicateBotUsername' }
             $channel = Invoke-HermesResearchMattermostAPI -ServerURL $InputObject.ServerURL -Path ("/api/v4/channels/$($InputObject.HomeChannelID)") -Token $agent.BotToken
             if ($channel.id -cne $InputObject.HomeChannelID -or $channel.delete_at -ne 0 -or $channel.type -cnotin @('O', 'P') -or $channel.team_id -cnotmatch '^[a-z0-9]{26}$') { throw 'InvalidChannel' }
             $member = Invoke-HermesResearchMattermostAPI -ServerURL $InputObject.ServerURL -Path ("/api/v4/channels/$($InputObject.HomeChannelID)/members/$($me.id)") -Token $agent.BotToken
             if ($member.user_id -cne $me.id -or $member.channel_id -cne $InputObject.HomeChannelID) { throw 'InvalidMembership' }
             $seen[[string]$me.id] = $true
-            $identities.Add([pscustomobject]@{ ProfileName = [string]$agent.ProfileName; BotUserID = [string]$me.id })
+            $seenNames[[string]$me.username] = $true
+            $identities.Add([pscustomobject]@{ ProfileName = [string]$agent.ProfileName; BotUserID = [string]$me.id; BotUsername = [string]$me.username })
         } catch {
             throw '서로 다른 활성 일반 봇 4개와 홈 채널 접근·멤버십을 모두 확인해야 합니다.'
         }
@@ -111,6 +118,140 @@ function Invoke-HermesResearchCommand {
     # Never return subprocess output: profile commands may expose local secrets.
 }
 
+function Get-HermesExistingResearchGatewaySnapshot {
+    param(
+        [Parameter(Mandatory = $true)]$Runtime,
+        [string[]]$ProfileNames = @()
+    )
+    $requested = @($ProfileNames | ForEach-Object { [string]$_ })
+    if (@($requested | Where-Object { $_ -cnotmatch '^[a-z0-9][a-z0-9_-]{0,63}$' }).Count -gt 0 -or
+        @($requested | Select-Object -Unique).Count -ne $requested.Count) { throw 'ExistingGatewayProfileSetRejected' }
+    $environment = @{}
+    foreach ($entry in $Runtime.Environment.GetEnumerator()) { $environment[[string]$entry.Key] = $entry.Value }
+    $environment['HERMES_HOME'] = [string]$Runtime.Paths.HermesHome
+    $environment['PYTHONDONTWRITEBYTECODE'] = '1'
+    $program = @'
+import os, sys
+sys.dont_write_bytecode = True
+
+def readonly_audit(event, args):
+    if event == "open":
+        mode = args[1] if len(args) > 1 else None
+        flags = args[2] if len(args) > 2 else 0
+        if ((isinstance(mode, str) and any(c in mode for c in "wax+")) or
+                (isinstance(flags, int) and flags &
+                 (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))):
+            raise PermissionError("HermesExistingGatewayReadOnlyProbe")
+    if (event.startswith(("winreg.", "os.spawn", "os.exec", "os.startfile", "subprocess.")) or
+            event in ("os.mkdir", "os.remove", "os.rename", "os.rmdir", "os.link", "os.symlink",
+                      "os.truncate", "os.chmod", "os.utime", "os.chown", "os.system", "os.posix_spawn",
+                      "socket.__new__", "socket.connect", "socket.bind", "socket.getaddrinfo")):
+        raise PermissionError("HermesExistingGatewayReadOnlyProbe")
+
+sys.addaudithook(readonly_audit)
+import contextlib, io, json, stat
+from pathlib import Path
+source_root = os.path.realpath(sys.argv[1])
+site_packages = os.path.join(source_root, "venv", "Lib", "site-packages")
+sys.path.insert(0, site_packages)
+sys.path.insert(0, source_root)
+names = [name for name in sys.argv[2].split(",") if name]
+answer = {"HostLive": False, "Multiplex": False, "Ambiguous": False,
+          "GatewayState": "", "Profiles": [
+              {"Name": name, "Served": False, "MattermostState": "",
+               "Connected": False, "NeedsAttention": False}
+              for name in names]}
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    from gateway.status import get_runtime_status_running_pid, read_runtime_status, runtime_status_is_stale
+    root = Path(os.environ["HERMES_HOME"])
+    candidates = [root]
+    profiles_root = root / "profiles"
+    if profiles_root.is_dir():
+        for entry in profiles_root.iterdir():
+            try:
+                attributes = getattr(entry.lstat(), "st_file_attributes", 0)
+                if entry.is_dir() and not entry.is_symlink() and not (
+                        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)):
+                    candidates.append(entry)
+            except OSError:
+                continue
+    live = []
+    for home in candidates:
+        runtime = read_runtime_status(home / "gateway_state.json")
+        if not isinstance(runtime, dict) or not isinstance(runtime.get("served_profiles"), list):
+            continue
+        if runtime.get("gateway_state") not in ("running", "degraded") or runtime_status_is_stale(runtime):
+            continue
+        recorded_home = runtime.get("hermes_home")
+        if not isinstance(recorded_home, str) or not recorded_home:
+            continue
+        try:
+            if os.path.normcase(os.path.realpath(recorded_home)) != os.path.normcase(os.path.realpath(str(home))):
+                continue
+            pid = get_runtime_status_running_pid(runtime, expected_home=home)
+        except Exception:
+            pid = None
+        if pid is not None:
+            live.append((home, runtime, int(pid)))
+    if len(live) == 1:
+        _home, runtime, _pid = live[0]
+        served = {str(item).lower() for item in runtime.get("served_profiles", []) if isinstance(item, str)}
+        platforms = runtime.get("platforms") if isinstance(runtime.get("platforms"), dict) else {}
+        answer["HostLive"] = True
+        # A standalone gateway explicitly publishes an empty served_profiles list;
+        # a real multiplexer always includes at least its active/default profile.
+        answer["Multiplex"] = bool(served)
+        answer["GatewayState"] = str(runtime.get("gateway_state") or "")
+        for profile_answer in answer["Profiles"]:
+            name = profile_answer["Name"]
+            platform = platforms.get(name + ":mattermost")
+            platform = platform if isinstance(platform, dict) else {}
+            state = str(platform.get("state") or "").lower()
+            attention = platform.get("needs_attention") is True
+            profile_answer.update({"Served": name.lower() in served,
+                                   "MattermostState": state,
+                                   "Connected": state == "connected" and not attention,
+                                   "NeedsAttention": attention})
+    elif len(live) > 1:
+        answer["Ambiguous"] = True
+print(json.dumps(answer, separators=(",", ":")))
+'@
+    $result = Invoke-HermesProcess -FilePath ([string]$Runtime.Python) -ArgumentList @('-I', '-S', '-B', '-c', $program, ([string]$Runtime.Paths.InstallDir), ($requested -join ',')) -WorkingDirectory ([string]$Runtime.Paths.InstallDir) -Environment $environment -TimeoutSeconds 30
+    if (-not $result.Started -or $result.TimedOut -or $result.ExitCode -ne 0) { throw 'ExistingGatewayStatusProbeFailed' }
+    try {
+        $snapshot = $result.StdOut.Trim() | ConvertFrom-Json
+        if ($snapshot.HostLive -isnot [bool] -or $snapshot.Multiplex -isnot [bool] -or $snapshot.Ambiguous -isnot [bool] -or
+            [string]$snapshot.GatewayState -cnotmatch '^[a-z0-9_-]{0,64}$' -or @($snapshot.Profiles).Count -ne $requested.Count) { throw 'InvalidSnapshot' }
+        $seen = @{}
+        foreach ($profile in @($snapshot.Profiles)) {
+            if ([string]$profile.Name -cnotmatch '^[a-z0-9][a-z0-9_-]{0,63}$' -or $seen.ContainsKey([string]$profile.Name) -or
+                $profile.Served -isnot [bool] -or $profile.Connected -isnot [bool] -or $profile.NeedsAttention -isnot [bool] -or
+                [string]$profile.MattermostState -cnotmatch '^[a-z0-9_-]{0,64}$') { throw 'InvalidProfileSnapshot' }
+            $seen[[string]$profile.Name] = $true
+        }
+        foreach ($name in $requested) { if (-not $seen.ContainsKey($name)) { throw 'MissingProfileSnapshot' } }
+    } catch { throw 'ExistingGatewayStatusResponseRejected' }
+    return $snapshot
+}
+
+function Wait-HermesExistingResearchGatewayReady {
+    param(
+        [Parameter(Mandatory = $true)]$Runtime,
+        [string[]]$ProfileNames,
+        [int]$TimeoutSeconds = 75
+    )
+    $deadline = (Get-Date).AddSeconds([Math]::Max(0, $TimeoutSeconds))
+    $snapshot = $null
+    do {
+        $snapshot = Get-HermesExistingResearchGatewaySnapshot -Runtime $Runtime -ProfileNames $ProfileNames
+        $ready = ($snapshot.HostLive -and $snapshot.Multiplex -and -not $snapshot.Ambiguous -and
+            @($snapshot.Profiles | Where-Object { -not $_.Served -or -not $_.Connected }).Count -eq 0)
+        if ($ready -or (Get-Date) -ge $deadline) { return $snapshot }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    return $snapshot
+}
+
 function Get-HermesResearchCurrentUserSID { return [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
 
 function Get-HermesResearchGatewayTask {
@@ -127,14 +268,27 @@ function Get-HermesResearchTaskPlan {
     return [pscustomobject]@{ TaskName = "Hermes Research $suffix - $ProfileName"; RunnerPath = $runner; Execute = $PowerShellPath; Arguments = $arguments; OwnerSID = $OwnerSID; Description = "$($script:ResearchManager); owner=$TeamID; profile=$ProfileName" }
 }
 
+function ConvertTo-HermesResearchPrincipalSID {
+    param([AllowNull()][string]$Identity)
+    if ([string]::IsNullOrWhiteSpace($Identity) -or $Identity -cne $Identity.Trim() -or $Identity -match '[\x00-\x1f]') { throw 'ResearchPrincipalIdentityRejected' }
+    try {
+        if ($Identity -match '^S-') { return (New-Object System.Security.Principal.SecurityIdentifier($Identity)).Value }
+        # Task Scheduler may return a resolved account name even when registered with a SID.
+        $account = New-Object System.Security.Principal.NTAccount($Identity)
+        return $account.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch { throw 'ResearchPrincipalIdentityUnresolved' }
+}
+
 function Assert-HermesResearchOwnedTask {
     param($Task, [Parameter(Mandatory = $true)]$Plan, [bool]$HasOwnership)
     if ($null -eq $Task) { return }
     try {
         $actions = @($Task.Actions)
+        $actualOwnerSID = ConvertTo-HermesResearchPrincipalSID -Identity ([string]$Task.Principal.UserId)
+        $expectedOwnerSID = (New-Object System.Security.Principal.SecurityIdentifier([string]$Plan.OwnerSID)).Value
         if (-not $HasOwnership -or $Task.Description -cne $Plan.Description -or $actions.Count -ne 1 -or
             -not [string]::Equals([string]$actions[0].Execute, [string]$Plan.Execute, [StringComparison]::OrdinalIgnoreCase) -or
-            [string]$actions[0].Arguments -cne $Plan.Arguments -or $Task.Principal.UserId -cne $Plan.OwnerSID -or
+            [string]$actions[0].Arguments -cne $Plan.Arguments -or $actualOwnerSID -cne $expectedOwnerSID -or
             [string]$Task.Principal.LogonType -cnotin @('Interactive', 'InteractiveToken', '3') -or [string]$Task.Principal.RunLevel -cnotin @('Limited', '0')) { throw 'ForeignTask' }
     } catch { throw '기존 예약 작업의 소유권을 확인할 수 없습니다. 다른 작업은 덮어쓰지 않습니다.' }
 }
@@ -227,7 +381,8 @@ function Invoke-HermesResearchTeamSetup {
         [string]$InstallDir,
         [string]$RuntimeRoot,
         [AllowNull()][scriptblock]$ProgressCallback,
-        [switch]$ReuseExistingProfiles
+        [switch]$ReuseExistingProfiles,
+        [switch]$UseExistingHermes
     )
     try { $summary = Assert-HermesResearchTeamInput -InputObject $InputObject } catch { throw '연구팀 입력 형식이 올바르지 않습니다. 역할·프로필·봇 토큰·로컬 서버 주소를 확인하세요.' }
     $normalizedAgents = @($summary.Agents | ForEach-Object {
@@ -241,127 +396,42 @@ function Invoke-HermesResearchTeamSetup {
     $isLoopback = ($serverUri.DnsSafeHost -ieq 'localhost')
     if ([Net.IPAddress]::TryParse($serverUri.DnsSafeHost.Trim('[', ']'), [ref]$loopbackIP)) { $isLoopback = [Net.IPAddress]::IsLoopback($loopbackIP) }
     if (-not $isLoopback) { throw '1인 연구팀은 로컬 loopback Mattermost 서버만 사용할 수 있습니다.' }
-    $paths = Get-HermesDefaultPaths -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot
+    $runtime = $null
+    if ($UseExistingHermes) {
+        try { $runtime = Get-HermesExistingRuntime -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot } catch { throw '기존 Hermes 실행 환경을 안전하게 확인하지 못했습니다. 기존 설치는 변경하지 않았습니다.' }
+        try {
+            if ([string]$runtime.RuntimeKind -cne 'Existing' -or $null -eq $runtime.Paths -or $null -eq $runtime.Environment) { throw 'InvalidExistingRuntime' }
+            $paths = $runtime.Paths
+            $expectedCommand = [IO.Path]::GetFullPath([string]$runtime.Command)
+            $existingPython = [IO.Path]::GetFullPath([string]$runtime.Python)
+            if (-not (Test-Path -LiteralPath $expectedCommand -PathType Leaf) -or -not (Test-Path -LiteralPath $existingPython -PathType Leaf) -or
+                -not (Test-HermesPathContains -ParentPath ([string]$paths.InstallDir) -ChildPath $expectedCommand) -or
+                -not (Test-HermesPathContains -ParentPath ([string]$paths.InstallDir) -ChildPath $existingPython)) { throw 'InvalidExistingRuntimePath' }
+        } catch { throw '기존 Hermes 실행 파일 구성을 안전하게 확인하지 못했습니다. 기존 설치는 변경하지 않았습니다.' }
+    } else {
+        $paths = Get-HermesDefaultPaths -HermesHome $HermesHome -InstallDir $InstallDir -RuntimeRoot $RuntimeRoot
+    }
     # Disallow accidentally copying a known token into public metadata or argv.
     $publicText = (@($paths.HermesHome, $paths.InstallDir, $paths.RuntimeRoot, $InputObject.ServerURL, $InputObject.HomeChannelID, $InputObject.ModelName) + @($InputObject.Agents | ForEach-Object { $_.ProfileName; $_.DisplayName; $_.RoleId }) + @($InputObject.Roles | ForEach-Object { $_.Id; $_.Name; $_.Instructions })) -join "`n"
     foreach ($agent in @($InputObject.Agents)) { if ($publicText.Contains([string]$agent.BotToken)) { throw '봇 토큰을 이름·역할·경로·기타 공개 설정에 넣을 수 없습니다.' } }
     foreach ($path in @($paths.HermesHome, $paths.InstallDir, $paths.RuntimeRoot)) { if (-not (Test-HermesSafeTargetPath -LiteralPath $path).Safe) { throw '연구팀 경로가 안전하지 않습니다.' } }
     if ((Test-HermesPathContains -ParentPath $paths.HermesHome -ChildPath $paths.RuntimeRoot) -or (Test-HermesPathContains -ParentPath $paths.RuntimeRoot -ChildPath $paths.HermesHome) -or (Test-HermesPathContains -ParentPath $paths.InstallDir -ChildPath $paths.RuntimeRoot) -or (Test-HermesPathContains -ParentPath $paths.RuntimeRoot -ChildPath $paths.InstallDir)) { throw 'RuntimeRoot는 Hermes 데이터·설치 경로와 분리되어야 합니다.' }
     Publish-HermesResearchStage $ProgressCallback 'research-verify' 'Hermes 설치와 기존 OpenAI Codex 인증을 확인합니다.' 5
-    $verificationLog = Join-Path ([System.IO.Path]::GetTempPath()) ('hermes-research-verify-' + [guid]::NewGuid().ToString('N') + '.log')
-    try {
-        $verification = Test-HermesInstallation -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir -RuntimeRoot $paths.RuntimeRoot -LogPath $verificationLog
-    } catch { throw '검증된 Hermes 설치가 필요합니다.' }
-    finally { if (Test-Path -LiteralPath $verificationLog -PathType Leaf) { Remove-Item -LiteralPath $verificationLog -Force -ErrorAction SilentlyContinue } }
-    $expectedCommand = [IO.Path]::GetFullPath((Join-Path $paths.InstallDir 'bin\hermes.exe'))
-    if ($verification.Verified -isnot [bool] -or -not $verification.Verified -or -not [string]::Equals([string]$verification.CommandPath, $expectedCommand, [StringComparison]::OrdinalIgnoreCase)) { throw '검증된 Hermes 설치가 필요합니다.' }
-    try { $codex = Get-HermesCodexStatus -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir -RuntimeRoot $paths.RuntimeRoot } catch { throw 'OpenAI Codex 인증 확인에 실패했습니다.' }
+    if (-not $UseExistingHermes) {
+        $verificationLog = Join-Path ([System.IO.Path]::GetTempPath()) ('hermes-research-verify-' + [guid]::NewGuid().ToString('N') + '.log')
+        try {
+            $verification = Test-HermesInstallation -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir -RuntimeRoot $paths.RuntimeRoot -LogPath $verificationLog
+        } catch { throw '검증된 Hermes 설치가 필요합니다.' }
+        finally { if (Test-Path -LiteralPath $verificationLog -PathType Leaf) { Remove-Item -LiteralPath $verificationLog -Force -ErrorAction SilentlyContinue } }
+        $expectedCommand = [IO.Path]::GetFullPath((Join-Path $paths.InstallDir 'bin\hermes.exe'))
+        if ($verification.Verified -isnot [bool] -or -not $verification.Verified -or -not [string]::Equals([string]$verification.CommandPath, $expectedCommand, [StringComparison]::OrdinalIgnoreCase)) { throw '검증된 Hermes 설치가 필요합니다.' }
+    }
+    try { $codex = Get-HermesCodexStatus -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir -RuntimeRoot $paths.RuntimeRoot -UseExistingHermes:$UseExistingHermes } catch { throw 'OpenAI Codex 인증 확인에 실패했습니다.' }
     if ($codex.LoggedIn -isnot [bool] -or -not $codex.LoggedIn) { throw 'OpenAI Codex 로그인을 먼저 완료하세요.' }
     if (@($codex.Models) -cnotcontains [string]$InputObject.ModelName) { throw '선택한 OpenAI Codex 모델을 기존 인증에서 확인할 수 없습니다.' }
     Publish-HermesResearchStage $ProgressCallback 'research-connection' '서로 다른 봇 4개와 홈 채널 멤버십을 변경 전에 확인합니다.' 10
     $identities = @(Test-HermesResearchTeamConnection -InputObject $InputObject)
-    $ownerSID = Get-HermesResearchCurrentUserSID
-    $powerShell = Get-HermesPowerShellExecutable
-    $statePath = Join-Path $paths.RuntimeRoot 'research\team.json'
-    if (-not (Test-HermesSafeTargetPath -LiteralPath $statePath).Safe) { throw '연구팀 상태 파일 경로가 안전하지 않습니다.' }
-    $prior = $null
-    $priorStateHash = $null
-    if (Test-Path -LiteralPath $statePath) {
-        if (-not $ReuseExistingProfiles) { throw '기존 연구팀 상태가 있습니다. 명시적으로 기존 프로필 재사용을 선택하세요.' }
-        try {
-            $priorStateHash = ConvertTo-HermesSha256 -LiteralPath $statePath
-            $prior = [IO.File]::ReadAllText($statePath, [Text.Encoding]::UTF8) | ConvertFrom-Json
-            if ($prior.Manager -cne $script:ResearchManager -or $prior.SchemaVersion -ne 1 -or $prior.OwnerSID -cne $ownerSID -or $prior.TeamID -cnotmatch '^[a-f0-9]{32}$' -or
-                -not [string]::Equals([string]$prior.HermesHome, [string]$paths.HermesHome, [StringComparison]::OrdinalIgnoreCase) -or
-                -not [string]::Equals([string]$prior.InstallDir, [string]$paths.InstallDir, [StringComparison]::OrdinalIgnoreCase) -or
-                -not [string]::Equals([string]$prior.RuntimeRoot, [string]$paths.RuntimeRoot, [StringComparison]::OrdinalIgnoreCase) -or
-                $prior.ServerURL -cne $InputObject.ServerURL.TrimEnd('/') -or $prior.HomeChannelID -cne $InputObject.HomeChannelID -or @($prior.Profiles).Count -ne 4) { throw 'InvalidOwnership' }
-            $priorNames = @($prior.Profiles | ForEach-Object {
-                if ($_.OwnsProfile -isnot [bool] -or $_.BotUserID -cnotmatch '^[a-z0-9]{26}$') { throw 'InvalidProfileOwnership' }
-                [string]$_.ProfileName
-            })
-            if (@($priorNames | Select-Object -Unique).Count -ne 4 -or @($priorNames | Where-Object { @($InputObject.Agents.ProfileName) -cnotcontains $_ }).Count -gt 0) { throw 'InvalidProfileOwnership' }
-        } catch { throw '기존 연구팀 상태의 소유권을 확인할 수 없습니다.' }
-    }
-    $teamID = $(if ($null -ne $prior) { [string]$prior.TeamID } else { [guid]::NewGuid().ToString('N') })
-    $records = New-Object System.Collections.Generic.List[object]
-    $plans = @{}
-    foreach ($agent in @($InputObject.Agents)) {
-        $profileDir = Join-Path (Join-Path $paths.HermesHome 'profiles') $agent.ProfileName
-        $identity = @($identities | Where-Object { $_.ProfileName -ceq $agent.ProfileName })[0]
-        $old = @($(if ($null -ne $prior) { $prior.Profiles }) | Where-Object { $null -ne $_ -and $_.ProfileName -ceq $agent.ProfileName })
-        $owned = ($old.Count -eq 1 -and $old[0].OwnsProfile -is [bool] -and $old[0].OwnsProfile -and $old[0].BotUserID -ceq $identity.BotUserID)
-        if ($old.Count -gt 1 -or ($old.Count -eq 1 -and $old[0].BotUserID -cne $identity.BotUserID)) { throw '기존 프로필의 봇 소유권이 다릅니다.' }
-        if ((Test-Path -LiteralPath $profileDir) -and (-not $ReuseExistingProfiles -or -not $owned -or -not (Test-Path -LiteralPath $profileDir -PathType Container))) { throw '기존 프로필은 이 연구팀에서 생성한 프로필만 명시적으로 재사용할 수 있습니다.' }
-        $plan = Get-HermesResearchTaskPlan -ProfileName $agent.ProfileName -HermesHome $paths.HermesHome -RuntimeRoot $paths.RuntimeRoot -OwnerSID $ownerSID -TeamID $teamID -PowerShellPath $powerShell
-        $plans[[string]$agent.ProfileName] = $plan
-        foreach ($target in @($profileDir, (Join-Path $profileDir '.env'), (Join-Path $profileDir 'SOUL.md'), $plan.RunnerPath)) { if (-not (Test-HermesSafeTargetPath -LiteralPath $target).Safe) { throw '연구팀 프로필·서비스 파일 경로가 안전하지 않습니다.' } }
-        $task = @(Get-HermesResearchGatewayTask -TaskName $plan.TaskName)
-        if ($task.Count -gt 1) { throw '연구팀 예약 작업 이름이 충돌합니다.' }
-        if ($task.Count -eq 1) { Assert-HermesResearchOwnedTask -Task $task[0] -Plan $plan -HasOwnership $owned }
-        $role = @($InputObject.Roles | Where-Object { $_.Id -ceq $agent.RoleId })[0]
-        if ([string]$role.Instructions -match 'HERMES EASY SETUP: MANAGED RESEARCH ROLE (START|END)') { throw '역할 지시문에 관리 블록 표식을 사용할 수 없습니다.' }
-        $soulPath = Join-Path $profileDir 'SOUL.md'
-        $existingSoul = $(if (Test-Path -LiteralPath $soulPath -PathType Leaf) { [IO.File]::ReadAllText($soulPath, [Text.Encoding]::UTF8) } else { '' })
-        $null = Merge-HermesResearchSoul -Existing $existingSoul -DisplayName $agent.DisplayName -Role $role
-        $records.Add([pscustomobject][ordered]@{ ProfileName = [string]$agent.ProfileName; DisplayName = [string]$agent.DisplayName; RoleId = [string]$agent.RoleId; BotUserID = [string]$identity.BotUserID; GatewayTask = [string]$plan.TaskName; OwnsProfile = [bool]$owned; Status = 'Pending'; ErrorCode = $null })
-    }
-    $state = [pscustomobject][ordered]@{ SchemaVersion = 1; Manager = $script:ResearchManager; OwnerSID = $ownerSID; TeamID = $teamID; HermesHome = $paths.HermesHome; InstallDir = $paths.InstallDir; RuntimeRoot = $paths.RuntimeRoot; ServerURL = $InputObject.ServerURL.TrimEnd('/'); HomeChannelID = [string]$InputObject.HomeChannelID; ModelName = [string]$InputObject.ModelName; UpdatedAt = ''; Profiles = $records.ToArray() }
-    $environment = New-HermesResearchEnvironment -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir
-    # A per-team lock serializes state commits and profile mutation. It is acquired
-    # only after all auth, remote membership, and foreign ownership checks pass.
-    $lockDir = Split-Path -Parent $statePath
-    if (-not (Test-Path -LiteralPath $lockDir -PathType Container)) { New-Item -ItemType Directory -Path $lockDir -Force -ErrorAction Stop | Out-Null }
-    $lockPath = Join-Path $lockDir 'team.lock'
-    $lock = $null
-    try {
-        try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) } catch { throw '연구팀 설정이 이미 실행 중이거나 잠금 파일에 접근할 수 없습니다.' }
-        if (($null -eq $prior -and (Test-Path -LiteralPath $statePath)) -or
-            ($null -ne $prior -and (-not (Test-Path -LiteralPath $statePath -PathType Leaf) -or (ConvertTo-HermesSha256 -LiteralPath $statePath) -cne $priorStateHash))) { throw '사전 검사 이후 연구팀 상태가 바뀌었습니다. 다시 검증하세요.' }
-        Save-HermesResearchTeamState -State $state -LiteralPath $statePath
-        for ($index = 0; $index -lt $records.Count; $index++) {
-            $record = $records[$index]
-            $agent = @($InputObject.Agents | Where-Object { $_.ProfileName -ceq $record.ProfileName })[0]
-            $role = @($InputObject.Roles | Where-Object { $_.Id -ceq $agent.RoleId })[0]
-            $profileDir = Join-Path (Join-Path $paths.HermesHome 'profiles') $record.ProfileName
-            $code = 'ProfileCreateFailed'
-            Publish-HermesResearchStage $ProgressCallback 'research-profile' ("프로필 {0}/4 설정: {1}" -f ($index + 1), $record.ProfileName) (15 + 20 * $index)
-            try {
-                if (-not (Test-Path -LiteralPath $profileDir -PathType Container)) {
-                    Invoke-HermesResearchCommand -CommandPath $expectedCommand -Arguments @('profile', 'create', $record.ProfileName) -Environment $environment -TimeoutSeconds 180
-                    if (-not (Test-Path -LiteralPath $profileDir -PathType Container)) { throw 'ProfileMissing' }
-                    $record.OwnsProfile = $true
-                    Save-HermesResearchTeamState -State $state -LiteralPath $statePath
-                } elseif (-not $record.OwnsProfile) { throw 'ProfileAppearedAfterPreflight' }
-                $code = 'RoleApplyFailed'
-                $soulPath = Join-Path $profileDir 'SOUL.md'
-                $existingSoul = $(if (Test-Path -LiteralPath $soulPath -PathType Leaf) { [IO.File]::ReadAllText($soulPath, [Text.Encoding]::UTF8) } else { '' })
-                Write-HermesResearchAtomicText -LiteralPath $soulPath -Text (Merge-HermesResearchSoul -Existing $existingSoul -DisplayName $record.DisplayName -Role $role)
-                $code = 'ModelConfigureFailed'
-                foreach ($setting in @(@('model.provider', 'openai-codex'), @('model.default', [string]$InputObject.ModelName), @('terminal.backend', 'local'), @('display.tool_progress', 'log'), @('compression.threshold', '0.85'), @('session_reset.mode', 'none'))) {
-                    Invoke-HermesResearchCommand -CommandPath $expectedCommand -Arguments @('-p', $record.ProfileName, 'config', 'set', [string]$setting[0], [string]$setting[1]) -Environment $environment
-                }
-                $code = 'MattermostConfigureFailed'
-                Set-HermesResearchEnvFile -LiteralPath (Join-Path $profileDir '.env') -Values @{ MATTERMOST_URL = $state.ServerURL; MATTERMOST_TOKEN = [string]$agent.BotToken; MATTERMOST_HOME_CHANNEL = $state.HomeChannelID; MATTERMOST_ALLOWED_USERS = ''; MATTERMOST_ALLOW_ALL_USERS = 'true'; MATTERMOST_REQUIRE_MENTION = 'true'; MATTERMOST_FREE_RESPONSE_CHANNELS = ''; MATTERMOST_REPLY_MODE = 'off' }
-                $code = 'GatewayRegisterFailed'
-                Register-HermesResearchGatewayTask -Plan $plans[$record.ProfileName] -CommandPath $expectedCommand -HermesHome $paths.HermesHome -InstallDir $paths.InstallDir -ProfileName $record.ProfileName -HasOwnership $record.OwnsProfile
-                $code = 'GatewayStartFailed'
-                Start-HermesResearchGatewayTask -Plan $plans[$record.ProfileName]
-                $code = 'GatewayStatusFailed'
-                Wait-HermesResearchGatewayReady -CommandPath $expectedCommand -ProfileName $record.ProfileName -Environment $environment -Plan $plans[$record.ProfileName] -TimeoutSeconds $script:ResearchGatewayReadyTimeoutSeconds
-                $record.Status = 'Succeeded'
-                $record.ErrorCode = $null
-            } catch {
-                $record.Status = 'Failed'
-                $record.ErrorCode = $code
-                Publish-HermesResearchStage $ProgressCallback 'research-profile' ("프로필 설정 실패: {0} ({1})" -f $record.ProfileName, $code) (30 + 20 * $index) 'failed'
-            }
-            Save-HermesResearchTeamState -State $state -LiteralPath $statePath
-        }
-    } finally { if ($null -ne $lock) { $lock.Dispose() } }
-    $successes = @($records | Where-Object { $_.Status -ceq 'Succeeded' }).Count
-    $resultProfiles = @($records | Select-Object ProfileName, DisplayName, RoleId, BotUserID, GatewayTask, Status, ErrorCode)
-    return [pscustomobject][ordered]@{ Succeeded = ($successes -eq 4); PartialSuccess = ($successes -gt 0 -and $successes -lt 4); Profiles = $resultProfiles; StatePath = $statePath; ServerURL = $state.ServerURL; HomeChannelID = $state.HomeChannelID; ModelName = $state.ModelName }
+    return Invoke-HermesGovernedResearchSetup -InputObject $InputObject -Paths $paths -Runtime $runtime -CommandPath $expectedCommand -Identities $identities -ReuseExistingProfiles:$ReuseExistingProfiles -UseExistingHermes:$UseExistingHermes -ProgressCallback $ProgressCallback
 }
 
-Export-ModuleMember -Function @('Invoke-HermesResearchTeamSetup')
+Export-ModuleMember -Function @('Invoke-HermesResearchTeamSetup','New-HermesResearchPolicy','Get-HermesResearchPolicy','Save-HermesResearchPolicy')

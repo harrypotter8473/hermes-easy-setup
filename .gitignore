@@ -21,6 +21,9 @@ config.yml
 *.crt
 
 # Temporary and edit backups
+__pycache__/
+*.py[cod]
+.pytest_cache/
 *.tmp
 *.temp
 *.bak

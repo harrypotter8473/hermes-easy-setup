@@ -45,6 +45,13 @@
       <TabItem x:Name="HermesTab" Header="2. Hermes·모델" IsEnabled="False">
         <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="20">
           <TextBlock Text="Hermes를 설치하고 네 에이전트가 사용할 모델을 연결합니다." FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/>
+          <CheckBox x:Name="UseExistingHermesCheck" Margin="0,14,0,8"><TextBlock Text="이 PC의 기존 Hermes를 선택해 사용합니다. 재설치·업데이트·새 로그인 없이 기존 인증과 프로필을 유지합니다. 선택한 로컬 설치의 코드를 실행하는 데 동의합니다." TextWrapping="Wrap"/></CheckBox>
+          <Grid Margin="0,0,0,8">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <StackPanel><TextBlock Text="기존 Hermes 데이터 폴더 (HERMES_HOME)"/><TextBox x:Name="ExistingHermesHome" IsEnabled="False" Margin="0,5,0,0" AutomationProperties.Name="기존 Hermes 데이터 폴더"/></StackPanel>
+            <StackPanel Grid.Column="2"><TextBlock Text="기존 Hermes 코드 폴더"/><TextBox x:Name="ExistingHermesInstallDir" IsEnabled="False" Margin="0,5,0,0" AutomationProperties.Name="기존 Hermes 코드 폴더"/></StackPanel>
+          </Grid>
+          <TextBlock x:Name="ExistingHermesStatus" Text="기존 설치가 있다면 위 항목을 선택하고 ‘기존 Hermes·인증 확인’을 누르세요. 새 연구 프로필만 추가하며 기존 프로필은 인수하지 않습니다." TextWrapping="Wrap" Foreground="#56657D"/>
           <WrapPanel Margin="0,16,0,12"><Button x:Name="HermesPlanButton" Content="PC 확인·설치 계획"/><Button x:Name="HermesStatusButton" Content="기존 Hermes·인증 확인"/></WrapPanel>
           <TextBox x:Name="HermesPlanText" Height="130" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Hermes 설치 계획"/>
           <CheckBox x:Name="HermesConsent" Content="표시된 계획에 따라 검증된 공식 Hermes 설치기를 실행하는 데 동의합니다." Margin="0,12,0,12"/>
@@ -75,14 +82,22 @@
               <TextBlock Text="역할 이름" Margin="0,8,0,4"/><TextBox x:Name="RoleName"/>
               <TextBlock Text="상세 역할 지침" Margin="0,8,0,4"/>
               <TextBox x:Name="RoleInstructions" Height="85" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
-              <Button x:Name="RoleSaveButton" Content="역할 템플릿 저장" HorizontalAlignment="Left" Margin="0,8,0,0"/>
+              <WrapPanel><Button x:Name="RoleSaveButton" Content="역할 템플릿 저장" Margin="0,8,0,0"/><Button x:Name="PersonaResetButton" Content="제공된 네 TXT 전체 불러오기" Margin="8,8,0,0"/></WrapPanel>
+            </StackPanel>
+          </Expander>
+          <Expander Header="운영 설정 — 미정 항목이 있으면 모델 실행 보류" Margin="0,0,0,10">
+            <StackPanel Margin="0,8,0,0">
+              <TextBlock Text="역할별 모델·도구·읽기/쓰기 경로·호출 대상·실행 한도와 연구자 Mattermost ID를 설정합니다. null은 미정, []는 허용 없음입니다. 외부 모델에 자료를 보내도 되는지 allow_model_egress를 명시하세요. 임의 기본 한도는 적용하지 않습니다." TextWrapping="Wrap"/>
+              <TextBox x:Name="PolicyJson" Height="220" AcceptsReturn="True" AcceptsTab="True" FontFamily="Consolas" FontSize="12" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Margin="0,8,0,8" AutomationProperties.Name="역할별 운영 설정 JSON"/>
+              <WrapPanel><Button x:Name="PolicyLoadButton" Content="저장된 운영 설정 읽기"/><Button x:Name="PolicySaveButton" Content="운영 설정 저장"/></WrapPanel>
+              <TextBlock Text="일반 Hermes 터미널·Python·브라우저·위임 도구는 연결하지 않습니다. 허용 가능한 중개 도구: read_text, write_artifact, dispatch, audit, complete. 상세 설정과 연구 시작 명령은 연구 가이드를 확인하세요." TextWrapping="Wrap" Margin="0,8,0,0"/>
             </StackPanel>
           </Expander>
           <CheckBox x:Name="TeamResumeCheck" Content="이 마법사에서 만든 연구 프로필을 재설정 (이름·역할·토큰 변경, 메모리·세션 유지)" Margin="0,6,0,10"/>
-          <CheckBox x:Name="TeamConsent" Content="네 프로필을 구성하고 로그인 시 자동 실행되는 Gateway 작업을 등록하는 데 동의합니다." Margin="0,0,0,12"/>
+          <CheckBox x:Name="TeamConsent" Content="네 프로필과 권한·감사 중개 서비스를 구성하고 로그인 시 자동 실행 작업을 등록하는 데 동의합니다." Margin="0,0,0,12"/>
           <WrapPanel><Button x:Name="TeamApplyButton" Content="연구팀 생성·연결" IsEnabled="False"/><Button x:Name="TeamOpenButton" Content="연구 채널 열기" IsEnabled="False"/></WrapPanel>
           <TextBox x:Name="TeamResult" Height="95" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="0,12,0,0" AutomationProperties.Name="연구팀 구성 결과"/>
-          <TextBlock Text="구성 완료 후 Mattermost에서 각 봇을 @멘션해 실제 답변을 확인하세요. 역할은 행동 지침이며, 네 봇의 자동 토론 기능은 후속 단계에서 추가할 수 있습니다." TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#56657D"/>
+          <TextBlock Text="제공된 전체 지침과 운영 정책은 파일로 유지됩니다. 답변은 요청 스레드에 남기고 봇 간 응답은 명시적 멘션이 있어야 처리합니다. 관리 에이전트만 다른 봇 발언을 관찰하며 사람의 채널 열람 권한은 변경하지 않습니다. 운영 설정 검증을 통과해야 /research 요청을 배정하고, 감사 통과한 버전에만 후속 작업을 연결합니다. 미정 설정이 남아 있으면 연구 실행은 보류됩니다." TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#56657D"/>
         </StackPanel></ScrollViewer>
       </TabItem>
     </TabControl>

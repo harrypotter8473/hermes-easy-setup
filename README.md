@@ -2,13 +2,18 @@
 
 ## 실행 파일 선택
 
-- **1인 연구실 초기 버전:** `Start-HermesResearchSetup.cmd` — 같은 Windows PC에 Mattermost 로컬 서버·Hermes·독립 에이전트 4개를 구성합니다. 이름·봇 토큰·역할을 한 페이지에서 설정하고 역할 지침을 나중에 수정할 수 있습니다. [개인 연구실 안내](docs/research-guide.ko.md)
+- **다른 PC에서 연구실 마법사 실행:** 이 저장소에서 `Code → Download ZIP`으로 받아 압축을 전부 푼 뒤 `Start-HermesResearchSetup.cmd`를 더블클릭하세요. Git for Windows와 WSL2가 준비된 Windows 10/11 x64에서 `로컬 서버 → Hermes·모델 → 에이전트 4개` 순서로 진행합니다. Docker는 없으면 동의 후 설치할 수 있습니다. 운영 권한·자료 경로·실행 한도를 확정하기 전에는 연구 실행이 보류됩니다.
+- **1인 연구실 초기 버전:** `Start-HermesResearchSetup.cmd` — 같은 Windows PC에 Mattermost·Hermes·관리/조사/분석/감사 프로필을 구성합니다. 전체 TXT 지침과 역할 권한·버전별 감사 게이트·실행 한도를 중개 실행기로 연결합니다. 미정 운영 설정은 자동 허용하지 않습니다. [개인 연구실 안내](docs/research-guide.ko.md)
 - **사용자용:** `Start-HermesEasySetup.cmd` — 기존 연구실 서버에 Mattermost Desktop·Hermes 봇 연결.
 - **관리자용 (Windows 테스트 배포):** `Start-HermesAdminSetup.cmd` — 별도 Docker Mattermost 서버·시스템 관리자·팀·채널, Bot Control, 봇·토큰 발급, 선택적 NetBird 공유. [관리자 설치 안내](docs/admin-guide.ko.md)
 
 관리자용은 Windows x64 Docker Desktop의 Linux 엔진이 필요합니다. 기본은 `127.0.0.1:18065`이며 NetBird 공유를 명시적으로 선택하면 현재 서버 PC의 NetBird IP에도 바인딩합니다. 기존 서버/GB10은 변경하지 않습니다. Bot Control 0.6.2를 동봉하고 설치 후 업로드를 잠급니다. 관리자 PC에도 Hermes가 필요하면 사용자용 마법사를 별도로 실행합니다. [5단계 검증 범위](docs/admin-step5-validation.ko.md)
 
 개인 연구실용에서는 Docker 설치 위치·공식 서명·Linux 엔진·PC 조건을 확인하고, 미설치 시 별도 동의 후 고정 공식 설치 파일을 다운로드·검증·설치합니다. Docker 약관은 직접 확인하며 Windows 기능·보안 정책·재부팅을 자동 처리하지 않습니다. 설치 완료와 엔진 준비 완료는 구분합니다. Docker 없는 설치 경로는 대안 안내만 제공하며 아직 구현되지 않았습니다.
+
+0.9.0 연구실 마법사는 **기존 Hermes 사용**을 별도로 선택할 수 있습니다. 기존 설치를 고정 버전으로 덮어쓰지 않고 데이터·코드 경로를 확인하며, 저장된 인증을 복사하거나 새 로그인하지 않습니다. 이 모드는 사용자가 선택해 신뢰하는 로컬 소스 설치의 호환성 검사이며, 새 설치의 고정 commit·attestation 검증과는 구분됩니다. 기존 프로필과 Gateway를 유지하고 새 연구 프로필만 추가합니다. 자세한 전제·제한은 [개인 연구실 안내](docs/research-guide.ko.md)를 확인하세요.
+
+0.10.0 연구실 경로는 네 개의 무제한 native Gateway 대신 권한·감사 중개 서비스 하나를 등록합니다. 제공된 네 페르소나 전체를 시스템 지침으로 읽고, 모델에는 임의 터미널·Python·네트워크·위임 도구를 노출하지 않습니다. 답변은 요청 스레드에 남기고 봇 간 응답은 명시적 멘션으로 연결하며, 관리 에이전트만 같은 요청의 다른 봇 발언을 관찰합니다. 사람의 채널 열람 권한을 제한하는 설정은 아닙니다. 지원된 중개 도구 밖의 검색·계산·게시 기능은 보류합니다. 이전 native 연구팀은 진행 중 작업을 보호하기 위해 자동 전환하지 않습니다. 설치·파일 검증과 실제 모델 응답 검증을 구분하며 GitHub에 자동 게시하지 않습니다.
 
 Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes-agent)를 설치하는 한국어 안전 마법사입니다.
 
@@ -22,7 +27,7 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 
 ## 현재 상태
 
-- 버전 `0.8.0` Windows 네이티브 사용자용 마법사 + 별도 관리자 테스트 마법사
+- 버전 `0.10.0` 개인 연구실용 마법사 + 기존 Windows 네이티브 사용자용·별도 관리자 테스트 마법사
 - 6개 화면에서 Hermes 설치·검증, Mattermost Desktop 설치·서버 등록, OpenAI Codex OAuth와 모델 선택, 독립 프로필, NetBird Dashboard, 부팅 Gateway, Bot Control 등록과 매주 업데이트까지 구성합니다.
 - 위 6개 화면은 사용자용입니다. 관리자용 서버 설치·계정 생성·Bot Control·봇/토큰 발급은 별도 `Start-HermesAdminSetup.cmd`에서 진행합니다. 프로젝트의 5단계 개발 계획과 사용자 마법사의 6개 화면은 별개입니다.
 - 봇 발급·재사용, 공유 실패 시 롤백, 사용자 봇 토큰·채널 사전 검사, 관리자용/사용자용 ZIP 분리 패키징을 지원합니다. 다른 PC에서 실제 Hermes·LLM 응답까지의 최종 승인은 [두 PC 체크리스트](docs/two-pc-checklist.ko.md)를 따라 진행해야 합니다.
@@ -44,10 +49,10 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 저장소 소스에서 Windows PowerShell로 실행합니다. 출력 폴더는 소스 폴더 밖의 새 경로를 지정하세요.
 
 ```powershell
-.\Build-Distributions.ps1 -DestinationRoot C:\Temp\Hermes-0.8.0
+.\Build-Distributions.ps1 -DestinationRoot C:\Temp\Hermes-0.10.0
 ```
 
-`Hermes-Research-Setup-0.8.0.zip`, `Hermes-Admin-Setup-0.8.0.zip`, `Hermes-User-Setup-0.8.0.zip`, `SHA256SUMS.txt`가 만들어집니다. ZIP 안에는 파일별 `FILES.sha256`도 있습니다. 소스 허용 목록만 패키징하며 개인 설치 상태·토큰·로그·Git 기록은 포함하지 않습니다. 같은 이름의 파일은 덮어쓰지 않습니다. 생성·해시 대조·압축 해제 후 세 GUI의 비설치 검사는 `tests/Run-DistributionTests.ps1`로 실행합니다. 빌드가 GitHub 게시나 코드 서명을 수행하지는 않습니다.
+`Hermes-Research-Setup-0.10.0.zip`, `Hermes-Admin-Setup-0.10.0.zip`, `Hermes-User-Setup-0.10.0.zip`, `SHA256SUMS.txt`가 만들어집니다. ZIP 안에는 파일별 `FILES.sha256`도 있습니다. 소스 허용 목록만 패키징하며 개인 설치 상태·토큰·로그·Git 기록은 포함하지 않습니다. 같은 이름의 파일은 덮어쓰지 않습니다. 생성·해시 대조·압축 해제 후 세 GUI의 비설치 검사는 `tests/Run-DistributionTests.ps1`로 실행합니다. 빌드가 GitHub 게시나 코드 서명을 수행하지는 않습니다.
 
 ## 빠른 시작
 
@@ -204,6 +209,8 @@ v0.1.x는 상류 설치기의 경로 표기 변환과 wrapper의 복구 계약�
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-RepositoryHygiene.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-PowerShellSyntax.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-CodexRuntimeTests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-ExistingRuntimeTests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-SecurityTests.ps1
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Run-GuiTests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-LabDashboardTests.ps1

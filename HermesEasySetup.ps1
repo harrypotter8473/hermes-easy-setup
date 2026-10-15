@@ -10,6 +10,7 @@ param(
     [ValidateSet('Later', 'Portal', 'Full')][string]$SetupMode = 'Portal',
     [switch]$Apply,
     [switch]$Resume,
+    [switch]$UseExistingHermes,
     [switch]$InstallBotControl,
     [switch]$ForceDownload,
     [switch]$LaunchSetup,
@@ -80,6 +81,9 @@ $eventCallback = {
 
 try {
     $common = @{ HermesHome = $HermesHome; InstallDir = $InstallDir; RuntimeRoot = $RuntimeRoot }
+    if ($UseExistingHermes -and $Action -cnotin @('CodexStatus', 'ResearchTeamSetup')) {
+        throw '기존 Hermes 사용 모드에서는 인증 확인과 연구팀 연결만 허용합니다. 설치·업데이트·새 로그인은 실행하지 않습니다.'
+    }
     switch ($Action) {
         'DockerStatus' {
             Write-ResultObject (Get-HermesDockerDesktopStatus)
@@ -157,7 +161,7 @@ try {
             }
         }
         'CodexStatus' {
-            Write-ResultObject (Get-HermesCodexStatus @common)
+            Write-ResultObject (Get-HermesCodexStatus @common -UseExistingHermes:$UseExistingHermes)
         }
         'CodexAuth' {
             if (-not $Apply) { throw (New-Object System.InvalidOperationException 'OpenAI Codex 인증을 시작하려면 -Apply를 함께 지정하세요.') }
@@ -202,11 +206,11 @@ try {
             & (Get-Module HermesEasySetup.Admin) { param($path) Assert-HermesAdminPath $path } $inputPath
             try {
                 $researchInput = Unprotect-HermesLabInput -LiteralPath $inputPath
-                $result = Invoke-HermesResearchTeamSetup -InputObject $researchInput @common -ReuseExistingProfiles:$Resume -ProgressCallback $eventCallback
+                $result = Invoke-HermesResearchTeamSetup -InputObject $researchInput @common -ReuseExistingProfiles:$Resume -UseExistingHermes:$UseExistingHermes -ProgressCallback $eventCallback
                 if ($JsonEvents) {
                     & $eventCallback ([pscustomobject]@{
                         type = 'complete'; state = $(if ($result.Succeeded) { 'succeeded' } else { 'failed' })
-                        percent = 100; message = $(if ($result.Succeeded) { '네 연구 에이전트의 프로필과 Gateway 기동을 확인했습니다.' } else { '일부 연구 에이전트를 구성하지 못했습니다. 성공한 프로필은 보존했습니다.' })
+                        percent = 100; message = $(if ($result.Succeeded) { '네 연구 에이전트의 프로필과 Gateway 연결을 확인했습니다.' } else { '일부 연구 에이전트를 구성하지 못했습니다. 성공한 프로필은 보존했습니다.' })
                         data = $result
                     })
                 } else { Write-ResultObject $result }

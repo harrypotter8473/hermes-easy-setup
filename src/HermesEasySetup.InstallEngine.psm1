@@ -2991,6 +2991,7 @@ function Invoke-HermesInstall {
     $launcherAttestationWrite = $null
     $resumeQuarantine = $null
     $useExistingCheckout = [bool]$preflight.ExistingCheckout
+    $freshPlan = $plan
     try {
         $lock = Enter-HermesInstallLock -RuntimeRoot $paths.RuntimeRoot
         $prior = Read-HermesInstallState -LiteralPath $paths.StateFile

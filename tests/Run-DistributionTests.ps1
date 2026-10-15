@@ -39,7 +39,8 @@ try {
             Assert (-not (Test-Path -LiteralPath (Join-Path $root 'HermesAdminSetup.Gui.ps1')) -and -not (Test-Path -LiteralPath (Join-Path $root 'assets'))) 'User ZIP omits admin UI and server plugin payload'
             $gui = 'HermesEasySetup.Gui.ps1'
         } elseif ($package.Kind -eq 'Research') {
-            Assert (-not (Test-Path -LiteralPath (Join-Path $root 'assets')) -and (Test-Path -LiteralPath (Join-Path $root 'ui/ResearchWindow.xaml'))) 'Research ZIP includes unified local UI without optional server plugin'
+            Assert (-not (Test-Path -LiteralPath (Join-Path $root 'assets/bot-control')) -and (Test-Path -LiteralPath (Join-Path $root 'ui/ResearchWindow.xaml'))) 'Research ZIP includes unified local UI without optional server plugin'
+            Assert ((Test-Path -LiteralPath (Join-Path $root 'assets/research-prompts/auditor.txt')) -and (Test-Path -LiteralPath (Join-Path $root 'engine/research_team/broker.py'))) 'Research ZIP includes personas and governed runtime'
             $gui = 'HermesResearchSetup.Gui.ps1'
         } else {
             Assert (-not (Test-Path -LiteralPath (Join-Path $root 'HermesEasySetup.Gui.ps1')) -and (Test-Path -LiteralPath (Join-Path $root 'assets/bot-control/com.infonet.bot-control-0.6.2.tar.gz'))) 'Admin ZIP includes pinned plugin and omits user UI'

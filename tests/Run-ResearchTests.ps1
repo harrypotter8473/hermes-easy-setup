@@ -27,7 +27,7 @@ New-Item -ItemType Directory -Path $root | Out-Null
 try {
     $roles = @(Get-HermesResearchRoles -RuntimeRoot $root)
     Assert (($roles.Id -join ',') -ceq 'planner,researcher,executor,reviewer') 'Four fixed role IDs in stable order'
-    Assert (($roles.Name -join ',') -ceq '총괄,조사,실행,검토') 'Korean default role names'
+    Assert (($roles.Name -join ',') -ceq '관리,조사,분석,감사') 'Korean default role names'
     Assert (-not (Test-Path -LiteralPath (Join-Path $root 'research'))) 'Reading defaults does not write files'
     $roles[0].Name = '연구 총괄'; $roles[0].Instructions = "첫 줄`n근거를 확인한다."
     $path = Save-HermesResearchRoles -Roles $roles -RuntimeRoot $root

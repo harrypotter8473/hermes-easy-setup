@@ -46,7 +46,7 @@ function New-HermesAdminBotRecord {
     $secretPath = Join-Path $directory ($InputData.BotUsername + '.bin')
     Assert-HermesAdminPath $path; Assert-HermesAdminPath $secretPath
     if (Test-Path -LiteralPath $path) {
-        $record = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $record = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($record.Schema -ne 1 -or $record.DeploymentId -cne $State.DeploymentId -or $record.OperationId -cnotmatch '^[a-f0-9]{32}$' -or
             $record.Username -cne $InputData.BotUsername -or $record.DisplayName -cne $InputData.BotDisplayName -or $record.Description -cne $InputData.BotDescription -or
             $record.AdminUserId -cne $State.AdminUserId -or $record.TeamId -cne $State.TeamId -or $record.ChannelId -cne $State.ChannelId) { throw '기존 봇 발급 기록과 입력이 다릅니다. 같은 입력으로 재시도하세요. 기존 봇은 변경하지 않습니다.' }

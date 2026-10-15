@@ -21,6 +21,40 @@ Import-Module (Join-Path $projectRoot 'src\HermesEasySetup.Loader.psm1') -Force
     foreach ($badURL in @('http://100.69.181.62:8065','https://example.invalid','http://localhost:18065','http://127.0.0.1:18065/redirect')) { Reject { Invoke-HermesAdminAPI $badURL '/api/v4/users' } 'Bootstrap refuses non-exact loopback base URL' }
     $root = Join-Path ([IO.Path]::GetTempPath()) ('hermes-admin-unit-' + [Guid]::NewGuid().ToString('N'))
     try {
+        # Windows PowerShell can decode JSON without charset incorrectly; raw UTF-8 is authoritative.
+        $httpJSON = [pscustomobject]@{ display_name = '총괄 에이전트'; description = '한글 응답' } | ConvertTo-Json -Compress
+        $httpBytes = [Text.Encoding]::UTF8.GetBytes($httpJSON)
+        $httpStream = New-Object IO.MemoryStream
+        $httpStream.Write($httpBytes,0,$httpBytes.Length); $httpStream.Position = 0
+        $emptyHTTPStream = New-Object IO.MemoryStream
+        $wrongHTTPContent = [Text.Encoding]::GetEncoding(28591).GetString($httpBytes)
+        $script:httpFixture = [pscustomobject]@{ Content = $wrongHTTPContent; RawContentStream = $httpStream; Headers = @{ 'Content-Type' = 'application/json'; Token = 'fixture-http-session' } }
+        function script:Invoke-WebRequest {
+            [CmdletBinding()]
+            param($Uri,$Method,$Headers,$Body,$ContentType,[switch]$UseBasicParsing,$TimeoutSec,$MaximumRedirection)
+            $script:capturedHTTPRequest = [pscustomobject]@{ Uri = $Uri; Method = $Method; Body = $Body; ContentType = $ContentType; MaximumRedirection = $MaximumRedirection }
+            return $script:httpFixture
+        }
+        try {
+            Assert (($wrongHTTPContent | ConvertFrom-Json).display_name -cne '총괄 에이전트') 'HTTP fixture reproduces incorrectly decoded Korean Content'
+            $httpResult = Invoke-HermesAdminAPI 'http://127.0.0.1:18065' '/api/v4/bots/fixture'
+            Assert ($httpResult.Data.display_name -ceq '총괄 에이전트' -and $httpResult.Data.description -ceq '한글 응답') 'Admin HTTP reader decodes raw JSON UTF-8 instead of mojibake Content'
+            Assert ($httpResult.Token -ceq 'fixture-http-session') 'Raw UTF-8 HTTP decoding preserves session header handoff'
+            $null = Invoke-HermesAdminAPI 'http://127.0.0.1:18065' '/api/v4/bots' 'POST' @{ display_name = '총괄 에이전트' }
+            $sentBody = [Text.Encoding]::UTF8.GetString([byte[]]$script:capturedHTTPRequest.Body) | ConvertFrom-Json
+            Assert ($sentBody.display_name -ceq '총괄 에이전트' -and $script:capturedHTTPRequest.ContentType -ceq 'application/json; charset=utf-8') 'Korean HTTP request body remains explicit UTF-8 bytes'
+            Assert ($script:capturedHTTPRequest.Uri -ceq 'http://127.0.0.1:18065/api/v4/bots' -and $script:capturedHTTPRequest.MaximumRedirection -eq 0) 'UTF-8 response handling keeps exact loopback and redirect guards'
+            $script:httpFixture = [pscustomobject]@{ Content = $httpJSON; Headers = @{ Token = '' } }
+            $fallbackResult = Invoke-HermesAdminAPI 'http://127.0.0.1:18065' '/api/v4/users/me'
+            Assert ($fallbackResult.Data.display_name -ceq '총괄 에이전트') 'Content-only mocked HTTP responses retain compatible fallback'
+            $script:httpFixture = [pscustomobject]@{ Content = ''; RawContentStream = $emptyHTTPStream; Headers = @{ Token = '' } }
+            $emptyResult = Invoke-HermesAdminAPI 'http://127.0.0.1:18065' '/api/v4/users/logout' 'POST'
+            Assert ($null -eq $emptyResult.Data -and $emptyResult.Token -ceq '') 'Empty raw HTTP body returns null data without JSON parse failure'
+        } finally {
+            Remove-Item Function:Invoke-WebRequest
+            $httpStream.Dispose(); $emptyHTTPStream.Dispose()
+            $script:httpFixture = $null; $script:capturedHTTPRequest = $null
+        }
         $state = New-HermesAdminState $data $root
         $statePath = Join-Path $state.Directory 'deployment.json'
         $secretPath = Join-Path $state.Directory 'database.bin'
@@ -34,6 +68,22 @@ Import-Module (Join-Path $projectRoot 'src\HermesEasySetup.Loader.psm1') -Force
         Assert (@($acl.Access).Count -eq 2) 'Only current user and SYSTEM have deployment access'
         $again = New-HermesAdminState $data $root -Resume
         Assert ($again.DeploymentId -ceq $state.DeploymentId) 'Resume preserves unique deployment identity'
+        # Match the product's UTF-8-without-BOM metadata, including on Windows PowerShell 5.1.
+        $unicodeData = $data | ConvertTo-Json | ConvertFrom-Json
+        $unicodeData.ServerId = 'unicode-test'; $unicodeData.SiteName = '한글 연구실'; $unicodeData.TeamDisplayName = '개인 연구 팀'
+        $unicodeState = New-HermesAdminState $unicodeData $root
+        $unicodePath = Join-Path $unicodeState.Directory 'deployment.json'
+        [IO.File]::WriteAllText($unicodePath,($unicodeState | ConvertTo-Json -Depth 32),(New-Object Text.UTF8Encoding $false))
+        $unicodeBytes = [IO.File]::ReadAllBytes($unicodePath)
+        Assert (-not ($unicodeBytes[0] -eq 239 -and $unicodeBytes[1] -eq 187 -and $unicodeBytes[2] -eq 191)) 'Korean deployment fixture is explicitly UTF-8 without BOM'
+        $unicodeAgain = New-HermesAdminState $unicodeData $root -Resume
+        Assert ($unicodeAgain.DeploymentId -ceq $unicodeState.DeploymentId) 'Korean deployment resume preserves unique identity'
+        Assert ($unicodeAgain.Identity.SiteName -ceq $unicodeData.SiteName -and $unicodeAgain.Identity.TeamDisplayName -ceq $unicodeData.TeamDisplayName) 'Korean server and team display names survive product metadata reader'
+        Set-HermesAdminComposeFiles $unicodeState
+        Set-HermesAdminComposeFiles $unicodeAgain
+        Assert $true 'Korean compose serialization remains stable after resume'
+        $unicodeChanged = $unicodeData | ConvertTo-Json | ConvertFrom-Json; $unicodeChanged.SiteName = '다른 연구실'
+        Reject { New-HermesAdminState $unicodeChanged $root -Resume } 'Korean identity change is still rejected on resume'
         Reject { New-HermesAdminState $data $root } 'Existing server requires explicit resume'
         $copy = $data | ConvertTo-Json | ConvertFrom-Json; $copy.Port = 18067
         Reject { New-HermesAdminState $copy $root -Resume } 'Resume cannot silently change server port'

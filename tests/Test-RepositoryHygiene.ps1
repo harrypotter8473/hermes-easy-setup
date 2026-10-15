@@ -13,6 +13,7 @@ $expectedModules = @(
     'HermesEasySetup.Core.psm1',
     'HermesEasySetup.Docker.psm1',
     'HermesEasySetup.Execution.psm1',
+    'HermesEasySetup.Existing.psm1',
     'HermesEasySetup.InstallEngine.psm1',
     'HermesEasySetup.Lab.psm1',
     'HermesEasySetup.Loader.psm1',

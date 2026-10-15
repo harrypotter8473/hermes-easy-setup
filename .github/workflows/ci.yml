@@ -37,6 +37,12 @@ jobs:
         shell: powershell
         run: .\tests\Run-SecurityTests.ps1
 
+      - name: Existing Hermes and read-only authentication tests
+        shell: powershell
+        run: |
+          .\tests\Run-ExistingRuntimeTests.ps1
+          .\tests\Run-CodexRuntimeTests.ps1
+
       - name: CLI contract tests
         shell: powershell
         run: .\tests\Run-CliTests.ps1
@@ -103,8 +109,13 @@ jobs:
           .\tests\Run-DockerTests.ps1
           .\tests\Run-DockerCliTests.ps1
           .\tests\Run-ResearchTests.ps1
+          .\tests\Run-ResearchPersonaTests.ps1
           .\tests\Run-ResearchRuntimeTests.ps1
           powershell.exe -NoLogo -NoProfile -STA -ExecutionPolicy Bypass -File .\HermesResearchSetup.Gui.ps1 -SmokeTest
+
+      - name: Offline research permissions, broker and Hermes worker tests
+        shell: powershell
+        run: python -B -m unittest discover -s tests -p 'test_research_*.py' -v
 
       - name: Local research tests on PowerShell 7
         shell: pwsh

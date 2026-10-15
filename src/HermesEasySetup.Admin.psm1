@@ -21,7 +21,7 @@ function Get-HermesAdminRoot {
 }
 
 function Get-HermesAdminPin {
-    $pin = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\config\mattermost-server.json') -Raw | ConvertFrom-Json
+    $pin = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\config\mattermost-server.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($pin.schema -ne 1 -or $pin.platform -cne 'linux/amd64' -or
         $pin.mattermostImage -cnotmatch '^mattermost/mattermost-enterprise-edition@sha256:[a-f0-9]{64}$' -or
         $pin.postgresImage -cnotmatch '^postgres@sha256:[a-f0-9]{64}$') { throw 'Mattermost 서버 공식 이미지 pin이 올바르지 않습니다.' }
@@ -179,7 +179,7 @@ function Get-HermesAdminPluginMode {
 }
 
 function Get-HermesAdminBotControlPackage {
-    $pin = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\config\bot-control.json') -Raw | ConvertFrom-Json
+    $pin = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\config\bot-control.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($pin.schema -ne 1 -or $pin.id -cne 'com.infonet.bot-control' -or $pin.version -cne '0.6.2' -or $pin.sha256 -cnotmatch '^[a-f0-9]{64}$' -or $pin.file -cne "com.infonet.bot-control-$($pin.version).tar.gz") { throw 'Bot Control 패키지 pin이 올바르지 않습니다.' }
     $path = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ('..\assets\bot-control\' + $pin.file)))
     Assert-HermesAdminPath $path
@@ -199,7 +199,7 @@ function New-HermesAdminState {
     $identity = Get-HermesAdminIdentity $InputData
     if (Test-Path -LiteralPath $statePath) {
         if (-not $Resume) { throw '같은 이름의 테스트 서버 기록이 있습니다. 기존 입력을 유지하고 이어서 설정을 선택하세요.' }
-        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($state.Schema -ne 1 -or $state.Owner -cne 'HermesEasySetup.Admin' -or $state.DeploymentId -cnotmatch '^[a-f0-9]{32}$' -or
             $state.Project -cne "hes-$($InputData.ServerId)-$($state.DeploymentId.Substring(0,8))" -or
             -not [string]::Equals([string]$state.Directory,$directory,[StringComparison]::OrdinalIgnoreCase)) { throw '이 마법사의 동일 테스트 서버 기록이 아닙니다. 변경하지 않습니다.' }
@@ -268,7 +268,13 @@ function Invoke-HermesAdminAPI {
     if ($null -ne $Body) { $request.Body = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 20 -Compress)); $request.ContentType = 'application/json; charset=utf-8' }
     try {
         $response = Invoke-WebRequest @request
-        $data = $(if ($response.Content) { $response.Content | ConvertFrom-Json } else { $null })
+        # Mattermost JSON is UTF-8; Windows PowerShell 5.1 may decode Content
+        # incorrectly when the server omits a charset parameter.
+        $jsonContent = [string]$response.Content
+        if ($response.PSObject.Properties['RawContentStream'] -and $response.RawContentStream -is [IO.MemoryStream]) {
+            $jsonContent = [Text.Encoding]::UTF8.GetString($response.RawContentStream.ToArray())
+        }
+        $data = $(if ($jsonContent) { $jsonContent | ConvertFrom-Json } else { $null })
         return [pscustomobject]@{ Data = $data; Token = [string]$response.Headers['Token'] }
     } catch {
         $code = 0

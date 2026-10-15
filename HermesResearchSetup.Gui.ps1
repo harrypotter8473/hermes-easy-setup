@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([switch]$SmokeTest,[string]$PreviewPath,[ValidateSet('Server','Team')][string]$PreviewStep = 'Team')
+param([switch]$SmokeTest,[string]$PreviewPath,[ValidateSet('Server','Hermes','Team')][string]$PreviewStep = 'Team')
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -15,15 +15,22 @@ foreach ($name in @(
     'ServerRestoreButton','ServerId','ServerPort','AdminUsername','AdminEmail','AdminPassword','PasswordConfirm',
     'ServerResumeCheck','ServerConsent','ServerCreateButton','ServerOpenButton','ServerNextButton','ServerStatus',
     'HermesPlanButton','HermesStatusButton','HermesPlanText','HermesConsent','HermesInstallButton',
+    'UseExistingHermesCheck','ExistingHermesHome','ExistingHermesInstallDir','ExistingHermesStatus',
     'AuthButton','AuthOpenButton','AuthStatus','AuthCode','ModelCombo','HermesNextButton',
     'TeamServerURL','HomeChannelID','TeamAdminPassword','AgentRows','RoleEditorCombo','RoleName','RoleInstructions','RoleSaveButton',
+    'PersonaResetButton','PolicyJson','PolicyLoadButton','PolicySaveButton',
     'TeamResumeCheck','TeamConsent','TeamApplyButton','TeamOpenButton','TeamResult','Progress','Log','CloseButton'
 )) {
     $ui[$name] = $window.FindName($name)
     if ($null -eq $ui[$name]) { throw "필수 연구실 컨트롤이 없습니다: $name" }
 }
 $script:paths = Get-HermesDefaultPaths
+$script:defaultPaths = $script:paths
+$script:useExistingHermes = $false
+$ui.ExistingHermesHome.Text = $script:paths.HermesHome
+$ui.ExistingHermesInstallDir.Text = $script:paths.InstallDir
 $script:roles = @(Get-HermesResearchRoles -RuntimeRoot $script:paths.RuntimeRoot)
+$ui.PolicyJson.Text = (Get-HermesResearchPolicy -RuntimeRoot $script:paths.RuntimeRoot | ConvertTo-Json -Depth 15)
 $script:agents = @()
 $script:busy = $false
 $script:dockerReady = $false
@@ -63,7 +70,7 @@ function Refresh-ResearchButtons {
     $ui.CloseButton.IsEnabled = $idle
     foreach ($name in @('DockerCheckButton','DockerGuideButton','ServerRestoreButton','ServerId','ServerPort',
         'AdminUsername','AdminEmail','AdminPassword','PasswordConfirm','ServerResumeCheck','ServerConsent',
-        'HermesConsent','TeamAdminPassword','TeamResumeCheck','TeamConsent','RoleEditorCombo','RoleName','RoleInstructions','RoleSaveButton')) {
+        'HermesConsent','UseExistingHermesCheck','TeamAdminPassword','TeamResumeCheck','TeamConsent','RoleEditorCombo','RoleName','RoleInstructions','RoleSaveButton','PersonaResetButton','PolicyJson','PolicyLoadButton','PolicySaveButton')) {
         $ui[$name].IsEnabled = $idle
     }
     $ui.DockerOpenButton.IsEnabled = $idle -and $script:dockerCanOpen
@@ -73,10 +80,16 @@ function Refresh-ResearchButtons {
     $ui.ServerOpenButton.IsEnabled = $idle -and $script:serverReady
     $ui.ServerNextButton.IsEnabled = $ui.ServerOpenButton.IsEnabled
     $ui.HermesTab.IsEnabled = $script:serverReady
-    $ui.HermesPlanButton.IsEnabled = $idle -and $script:serverReady
-    $ui.HermesStatusButton.IsEnabled = $ui.HermesPlanButton.IsEnabled
-    $ui.HermesInstallButton.IsEnabled = $idle -and $null -ne $script:plan -and $ui.HermesConsent.IsChecked -eq $true
-    $ui.AuthButton.IsEnabled = $idle -and $script:hermesReady
+    $ui.ExistingHermesHome.IsEnabled = $idle -and $script:useExistingHermes
+    $ui.ExistingHermesInstallDir.IsEnabled = $idle -and $script:useExistingHermes
+    $ui.HermesPlanButton.IsEnabled = $idle -and $script:serverReady -and -not $script:useExistingHermes
+    $ui.HermesStatusButton.IsEnabled = $idle -and $script:serverReady
+    $ui.HermesConsent.IsEnabled = $idle -and -not $script:useExistingHermes
+    $ui.HermesInstallButton.IsEnabled = $idle -and -not $script:useExistingHermes -and $null -ne $script:plan -and $ui.HermesConsent.IsChecked -eq $true
+    $ui.AuthButton.IsEnabled = $idle -and $script:hermesReady -and -not $script:useExistingHermes
+    foreach ($name in @('HermesPlanText','HermesConsent','HermesInstallButton','AuthButton','AuthOpenButton','AuthCode')) {
+        $ui[$name].Visibility = $(if ($script:useExistingHermes) { [Windows.Visibility]::Collapsed } else { [Windows.Visibility]::Visible })
+    }
     $ui.AuthOpenButton.IsEnabled = $null -ne $script:authURL
     $ui.ModelCombo.IsEnabled = $idle -and $script:authenticated
     $ui.HermesNextButton.IsEnabled = $idle -and $script:authenticated -and $null -ne $ui.ModelCombo.SelectedItem
@@ -237,6 +250,12 @@ function Save-ResearchEncryptedInput {
 function Start-ResearchWorker {
     param([string]$Action,[string[]]$ExtraArguments = @())
     if ($script:busy) { return }
+    if ($script:useExistingHermes -and $Action -cin @('Plan','Install','CodexAuth')) { throw '기존 Hermes 사용 모드에서는 설치·업데이트·새 로그인을 실행하지 않습니다.' }
+    if ($script:useExistingHermes -and $Action -cin @('CodexStatus','ResearchTeamSetup')) {
+        if ([string]::IsNullOrWhiteSpace($ui.ExistingHermesHome.Text) -or [string]::IsNullOrWhiteSpace($ui.ExistingHermesInstallDir.Text)) { throw '기존 Hermes 데이터 폴더와 코드 폴더를 모두 확인하세요.' }
+        $script:paths = Get-HermesDefaultPaths -HermesHome $ui.ExistingHermesHome.Text.Trim() -InstallDir $ui.ExistingHermesInstallDir.Text.Trim() -RuntimeRoot $script:defaultPaths.RuntimeRoot
+        $ExtraArguments = @($ExtraArguments) + @('-UseExistingHermes')
+    }
     $arguments = @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'HermesEasySetup.ps1'),
         '-Action',$Action,'-JsonEvents','-HermesHome',$script:paths.HermesHome,'-InstallDir',$script:paths.InstallDir,'-RuntimeRoot',$script:paths.RuntimeRoot) + $ExtraArguments
     $start = New-Object Diagnostics.ProcessStartInfo
@@ -299,6 +318,10 @@ function Set-ResearchAuthStatus {
     $script:authenticated = [bool]$Status.LoggedIn
     $ui.AuthStatus.Text = [string]$Status.Summary
     $previous = $(if ($script:preferredModel) { $script:preferredModel } else { [string]$ui.ModelCombo.SelectedItem })
+    if (-not $previous -and $Status.PSObject.Properties['PreferredModel']) { $previous = [string]$Status.PreferredModel }
+    if ($Status.PSObject.Properties['RuntimeKind'] -and $Status.RuntimeKind -ceq 'Existing') {
+        $ui.ExistingHermesStatus.Text = "기존 설치 사용: $($Status.Version)`n코드: $($script:paths.InstallDir)`n데이터·인증·기존 프로필 유지 / 재설치 없음"
+    }
     $ui.ModelCombo.Items.Clear()
     foreach ($model in @($Status.Models)) { [void]$ui.ModelCombo.Items.Add([string]$model) }
     if ($previous -and @($Status.Models) -contains $previous) { $ui.ModelCombo.SelectedItem = $previous }
@@ -373,11 +396,15 @@ function Complete-ResearchWorker {
                 $ui.TeamResult.Text = $lines -join [Environment]::NewLine
                 $ui.TeamResumeCheck.IsChecked = $true
             }
-            if ($success -and [bool]$result.Succeeded) { Add-ResearchLog '네 Gateway 기동을 확인했습니다. 연구 채널에서 각 봇을 @멘션해 실제 모델 답변을 확인하세요.' }
+            if ($success -and [bool]$result.Succeeded) {
+                $ui.PolicyJson.Text = (Get-HermesResearchPolicy -RuntimeRoot $script:paths.RuntimeRoot | ConvertTo-Json -Depth 15)
+                if ($result.ExecutionReady) { Add-ResearchLog '전체 지침과 운영 정책을 검증했습니다. 연구 채널에서 /research JSON 형식으로 범위·입력 참조·산출물을 지정하세요. 상세 명령은 연구 가이드를 확인하세요.' }
+                else { Add-ResearchLog ('설정 파일 설치 완료, 연구 실행은 보류입니다. 미정 설정: ' + (@($result.PendingSettings) -join ', ')) }
+            }
             else { Add-ResearchLog '일부 연구팀 설정을 완료하지 못했습니다. 결과를 확인하고 연구 프로필 재설정으로 다시 시도하세요.' }
         }
     }
-    if (-not $success -and -not $script:workerFailed) { Add-ResearchLog '작업의 완료 결과를 확인하지 못했습니다. 이전 데이터는 보존됩니다.' }
+    if (-not $success -and -not $script:workerFailed) { Add-ResearchLog '작업의 완료 결과를 확인하지 못했습니다. 일부 설정이 적용됐을 수 있으므로 상태를 다시 확인한 뒤 재시도하세요.' }
     Refresh-ResearchButtons
 }
 
@@ -429,13 +456,28 @@ $ui.RoleEditorCombo.Add_SelectionChanged({
     if ($null -ne $selected) { $ui.RoleName.Text = [string]$selected.Name; $ui.RoleInstructions.Text = [string]$selected.Instructions }
 })
 Refresh-ResearchRoles
+$ui.PersonaResetButton.Add_Click({
+    if ($script:busy) { return }
+    $script:roles = @(Get-HermesResearchRoles)
+    Refresh-ResearchRoles
+    Add-ResearchLog '제공된 관리·조사·분석·감사 TXT 전체를 불러왔습니다. 연구팀 생성·재설정으로 적용하세요.'
+})
+$ui.PolicyLoadButton.Add_Click({ try { if (-not $script:busy) { $ui.PolicyJson.Text = (Get-HermesResearchPolicy -RuntimeRoot $script:paths.RuntimeRoot | ConvertTo-Json -Depth 15) } } catch { Add-ResearchLog $_.Exception.Message } })
+$ui.PolicySaveButton.Add_Click({
+    try {
+        if ($script:busy) { return }
+        foreach ($agent in $script:agents) { if ($agent.Token.Password.Length -eq 26 -and $ui.PolicyJson.Text.Contains($agent.Token.Password)) { throw '운영 설정에 봇 토큰을 넣을 수 없습니다.' } }
+        $null = Save-HermesResearchPolicy -RuntimeRoot $script:paths.RuntimeRoot -Json $ui.PolicyJson.Text
+        Add-ResearchLog '운영 설정을 저장했습니다. 실행 시 값·경로·권한·한도를 다시 검사합니다. 실행 중 요청의 정책은 자동 교체하지 않습니다.'
+    } catch { Add-ResearchLog $_.Exception.Message }
+})
 $ui.RoleSaveButton.Add_Click({
     try {
         $selected = $ui.RoleEditorCombo.SelectedItem
         if ($null -eq $selected -or $script:busy) { return }
         $id = [string]$selected.Id
         $changed = @($script:roles | ForEach-Object {
-            if ([string]$_.Id -ceq $id) { [pscustomobject]@{ Id = $id; Name = $ui.RoleName.Text.Trim(); Instructions = $ui.RoleInstructions.Text.Trim() } } else { $_ }
+            if ([string]$_.Id -ceq $id) { [pscustomobject]@{ Id = $id; Name = $ui.RoleName.Text.Trim(); Instructions = $ui.RoleInstructions.Text } } else { $_ }
         })
         $publicText = ($changed | ConvertTo-Json -Depth 8 -Compress)
         foreach ($agent in $script:agents) {
@@ -486,13 +528,28 @@ foreach ($name in @('ServerId','ServerPort','AdminUsername','AdminEmail')) {
 }
 $ui.ServerOpenButton.Add_Click({ if ($script:serverReady) { Start-Process $script:serverURL | Out-Null } })
 $ui.ServerNextButton.Add_Click({ if ($script:serverReady) { $ui.WizardTabs.SelectedIndex = 1 } })
+function Reset-ResearchHermesSelection {
+    $script:hermesReady = $false; $script:authenticated = $false; $script:plan = $null
+    $script:preferredModel = $null
+    $script:authURL = $null; $ui.AuthCode.Clear(); $ui.ModelCombo.Items.Clear()
+    $ui.HermesConsent.IsChecked = $false; $ui.HermesPlanText.Clear()
+    $ui.AuthStatus.Text = '선택한 경로에서 기존 Hermes·인증을 다시 확인하세요.'
+    $ui.TeamConsent.IsChecked = $false
+    $ui.TeamConsent.Content = $(if ($script:useExistingHermes) { '새 연구 프로필 네 개를 추가하고 실행 중인 기존 Gateway에 연결합니다. 기존 프로필·인증·Gateway 작업은 변경하지 않습니다.' } else { '네 프로필을 구성하고 로그인 시 자동 실행되는 Gateway 작업을 등록하는 데 동의합니다.' })
+    Refresh-ResearchButtons
+}
+$ui.UseExistingHermesCheck.Add_Checked({ $script:useExistingHermes = $true; Reset-ResearchHermesSelection })
+$ui.UseExistingHermesCheck.Add_Unchecked({ $script:useExistingHermes = $false; $script:paths = $script:defaultPaths; Reset-ResearchHermesSelection })
+foreach ($name in @('ExistingHermesHome','ExistingHermesInstallDir')) {
+    $ui[$name].Add_TextChanged({ if ($script:useExistingHermes -and -not $script:busy) { Reset-ResearchHermesSelection } })
+}
 $ui.HermesPlanButton.Add_Click({
     try { $script:plan = $null; $ui.HermesConsent.IsChecked = $false; Start-ResearchWorker 'Plan' @('-SkipComputerUse','-SetupMode','Later') }
     catch { Add-ResearchLog $_.Exception.Message }
 })
 $ui.HermesInstallButton.Add_Click({
     try {
-        if ($script:busy -or $null -eq $script:plan -or $ui.HermesConsent.IsChecked -ne $true) { return }
+        if ($script:busy -or $script:useExistingHermes -or $null -eq $script:plan -or $ui.HermesConsent.IsChecked -ne $true) { return }
         $extra = @('-Apply','-SkipComputerUse','-SetupMode','Later','-ExpectedPlanFingerprint',[string]$script:plan.Fingerprint)
         $prior = Read-HermesInstallState -LiteralPath $script:paths.StateFile
         if ($null -ne $prior -and @('Running','Failed') -contains [string]$prior.status -and [string]$prior.plan_fingerprint -ceq [string]$script:plan.Fingerprint) { $extra += '-Resume' }
@@ -515,6 +572,8 @@ $ui.TeamApplyButton.Add_Click({
             } })
         }
         $null = Assert-HermesResearchTeamInput -InputObject $data
+        foreach ($agent in $script:agents) { if ($agent.Token.Password.Length -eq 26 -and $ui.PolicyJson.Text.Contains($agent.Token.Password)) { throw '운영 설정에 봇 토큰을 넣을 수 없습니다.' } }
+        $null = Save-HermesResearchPolicy -RuntimeRoot $script:paths.RuntimeRoot -Json $ui.PolicyJson.Text
         $path = Save-ResearchEncryptedInput $data
         $extra = @('-Apply','-ResearchInputPath',$path)
         if ($ui.TeamResumeCheck.IsChecked -eq $true) { $extra += '-Resume' }
@@ -590,6 +649,19 @@ if ($SmokeTest) {
     $script:busy = $true; Refresh-ResearchButtons
     if ($ui.TeamApplyButton.IsEnabled -or $ui.CloseButton.IsEnabled -or @($script:agents | Where-Object { $_.Token.IsEnabled }).Count -ne 0) { throw '작업 중 입력과 닫기가 차단되지 않습니다.' }
     $script:busy = $false; Refresh-ResearchButtons
+    $ui.UseExistingHermesCheck.IsChecked = $true
+    $script:plan = [pscustomobject]@{ Fingerprint = 'fixture' }
+    $ui.HermesConsent.IsChecked = $true
+    Set-ResearchAuthStatus ([pscustomobject]@{ LoggedIn = $true; Models = @('original-model','other-model'); PreferredModel = 'original-model'; Summary = 'fixture existing credentials'; RuntimeKind = 'Existing'; Version = 'fixture version' })
+    Refresh-ResearchButtons
+    if ($ui.HermesPlanButton.IsEnabled -or $ui.HermesInstallButton.IsEnabled -or $ui.AuthButton.IsEnabled -or [string]$ui.ModelCombo.SelectedItem -cne 'original-model') { throw '기존 Hermes 모드가 재설치·새 로그인을 허용하거나 기존 모델 선택을 잃었습니다.' }
+    $originalHomeText = $ui.ExistingHermesHome.Text
+    $script:preferredModel = 'other-model'
+    $ui.ExistingHermesHome.Text = $originalHomeText + '-changed'
+    if ($script:authenticated -or $ui.HermesNextButton.IsEnabled -or $ui.TeamApplyButton.IsEnabled -or $null -ne $script:preferredModel) { throw '경로 변경이 이전 인증·모델 선택을 재사용했습니다.' }
+    $ui.ExistingHermesHome.Text = $originalHomeText
+    $ui.UseExistingHermesCheck.IsChecked = $false
+    Refresh-ResearchButtons
     $script:worker = [pscustomobject]@{ HasExited = $true; ExitCode = 1 }
     $script:worker | Add-Member ScriptMethod WaitForExit { }
     $script:worker | Add-Member ScriptMethod Dispose { }
@@ -600,7 +672,12 @@ if ($SmokeTest) {
     if ($script:busy -or $null -ne $script:worker -or -not $ui.CloseButton.IsEnabled) { throw '작업 읽기 실패 후 종료 잠금이 풀리지 않습니다.' }
     $ui.Log.Clear()
     if ($PreviewPath) {
-        $ui.WizardTabs.SelectedIndex = $(if ($PreviewStep -ceq 'Server') { 0 } else { 2 })
+        if ($PreviewStep -ceq 'Hermes') {
+            $ui.UseExistingHermesCheck.IsChecked = $true
+            Set-ResearchAuthStatus ([pscustomobject]@{ LoggedIn = $true; Models = @('existing-model'); PreferredModel = 'existing-model'; Summary = '미리보기: 기존 Hermes와 저장된 인증 발견 — 기존 파일 변경 없음'; RuntimeKind = 'Existing'; Version = 'Hermes existing source (commit example)' })
+            Refresh-ResearchButtons
+        }
+        $ui.WizardTabs.SelectedIndex = $(switch ($PreviewStep) { 'Server' { 0 } 'Hermes' { 1 } default { 2 } })
         $window.Show(); $window.UpdateLayout()
         $bitmap = New-Object Windows.Media.Imaging.RenderTargetBitmap([int]$window.ActualWidth,[int]$window.ActualHeight,96,96,[Windows.Media.PixelFormats]::Pbgra32)
         $bitmap.Render($window)
