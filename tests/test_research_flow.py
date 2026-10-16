@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 from pathlib import Path
 import tempfile
@@ -400,7 +401,7 @@ class ResearchFlowTests(unittest.TestCase):
 
         def routed_worker(payload, _timeout, _expected_digest):
             nonlocal manager_turn, researcher_turn
-            captured.append(payload)
+            captured.append(copy.deepcopy(payload))
             role = payload["role"]
             actions = []
             if role == "manager":
@@ -610,7 +611,7 @@ class ResearchFlowTests(unittest.TestCase):
             role["limits"].update(attempts=80, tokens=2_000_000, seconds=600)
         (self.root / "policy.json").write_text(json.dumps(config), encoding="utf-8")
         self.broker.policy = PolicyEngine(self.root / "policy.json", self.root / "policy.sqlite")
-        captured, rejected = [], False
+        captured, rejected = [], 0
         original_action = self.broker.action
 
         def action(request_id, task_id, role, item):
@@ -620,6 +621,7 @@ class ResearchFlowTests(unittest.TestCase):
                 "task_id": task_id, "source_url": "https://example.org/source", "fetched_at": "fixture",
                 "response_sha256": "a" * 64}
             if item["tool"] == "search_web":
+                result.update(query=item["query"], provider="fixture")
                 result["results"] = [{"title": "Original", "url": "https://example.org/source", "snippet": "original"}]
             else:
                 result.update(url="https://example.org/source", text="actual original source fixture",
@@ -629,7 +631,7 @@ class ResearchFlowTests(unittest.TestCase):
 
         def worker(payload, timeout, expected_digest):
             nonlocal rejected
-            captured.append(payload)
+            captured.append(copy.deepcopy(payload))
             context, role = payload["input"]["context"], payload["role"]
             state = context["automatic_workflow"]
             scope, stage = state["output_scope_token"], state["stage"]
@@ -638,21 +640,23 @@ class ResearchFlowTests(unittest.TestCase):
                 actions = [{"tool": "complete", "scope": scope}]
             elif stage == "research":
                 results = state["stage_results"]
-                if not results and not skip_research_tools:
+                if not context["web_execution_evidence"]["searches"] and not skip_research_tools:
                     actions = [{"tool": "search_web", "query": "original evidence"}]
-                elif len(results) == 1 and not skip_research_tools:
+                elif not context["untrusted_web_sources"] and not skip_research_tools:
                     actions = [{"tool": "read_web", "url": "https://example.org/source"}]
                 else:
                     actions = [{"tool": "write_artifact", "name": "researcher", "scope": scope,
-                                "content": "research evidence https://example.org/source"}]
+                                "content": "Research evidence https://example.org/source\n" +
+                                "The captured original provides the evidence used for this draft. The source was actually retrieved by the research role; its limited scope does not establish a general conclusion. This report separates observed facts from proposed interpretations and records uncertainty for independent audit."}]
             elif stage in ("analysis", "synthesis"):
                 actions = [{"tool": "write_artifact", "name": "report" if role == "manager" else "analyst",
-                            "scope": scope, "content": "reviewed " + role + " output"}]
+                            "scope": scope, "content": "Reviewed " + role + " output. " +
+                            "The assigned research is evaluated against the captured original. A short source cannot establish a universal effect, so the conclusion is limited to the evidence reviewed. Remaining uncertainties and proposed follow-up work are stated explicitly for the independent auditor."}]
             elif role == "auditor":
                 for ref in context["task"]["dependencies"]:
                     verdict = "pass"
-                    if reject_once and not rejected and ref["role"] == "researcher":
-                        rejected, verdict = True, "reject"
+                    if reject_once and rejected < 2 and ref["role"] == "researcher":
+                        rejected, verdict = rejected + 1, "reject"
                     actions.append({"tool": "audit", "artifact_ref": {**ref, "scope": scope}, "scope": scope,
                         "stage": context["task"]["audit_stage"], "verdict": verdict,
                         "notes": "Compare original source and correct missing attribution"})
@@ -685,6 +689,10 @@ class ResearchFlowTests(unittest.TestCase):
                 self.assertTrue(all(item["source_role"] == "manager" for item in context["verified_messages"]))
             if payload["role"] == "auditor":
                 self.assertEqual("actual original source fixture", context["untrusted_web_sources"][0]["text"])
+            if context["automatic_workflow"]["stage"] in ("synthesis_audit", "final_audit"):
+                self.assertEqual(state["artifacts"]["manager"], context["report_preview"]["artifact_ref"])
+                self.assertTrue(context["report_preview"]["source_content_preserved"])
+                self.assertEqual(hashlib.sha256(self.client.report_bytes).hexdigest(), context["report_preview"]["sha256"])
         self.assertFalse(check_live_evidence(self.root), "Mocked workflows must never mark installation ready")
         calls = len(captured)
         self.natural_request()
@@ -697,7 +705,7 @@ class ResearchFlowTests(unittest.TestCase):
         self.assertEqual("reviewed", state["status"], state)
         self.assertEqual(2, state["artifacts"]["researcher"]["version"])
         stages = [p["input"]["context"]["automatic_workflow"]["stage"] for p in captured]
-        self.assertEqual(2, stages.count("research_audit"))
+        self.assertEqual(3, stages.count("research_audit"))
         self.assertGreater(stages.index("analysis"), max(i for i, stage in enumerate(stages) if stage == "research_audit"))
         records = self.broker.policy.list_audit_records(request_id, role="auditor")
         self.assertTrue(any(row["verdict"] == "reject" for row in records))
@@ -720,6 +728,111 @@ class ResearchFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "LiveTestRequiresProductionRuntime"):
             self.broker.self_test("human-fixture")
 
+    def test_execution_ledger_survives_audit_and_reassignment_without_repeating_tools(self):
+        captured = self.automatic_fixture(reject_once=True)
+        request = self.natural_request()
+        records = self.broker.policy.list_web_evidence(request)
+        self.assertEqual(["search_web", "read_web"], [item["tool"] for item in records])
+        contexts = [p["input"]["context"] for p in captured]
+        auditors = [c for c in contexts if c["task"]["role"] == "auditor"]
+        revised = [c for c in contexts if c["automatic_workflow"]["stage"] == "research"
+                   and c["automatic_workflow"]["previous_own_output"]]
+        self.assertTrue(revised)
+        self.assertEqual([], revised[0]["automatic_workflow"]["stage_results"])
+        for context in auditors + revised:
+            ledger = context["web_execution_evidence"]
+            self.assertEqual(request, ledger["request_id"])
+            self.assertEqual("original evidence", ledger["first_successful_search_query"])
+            self.assertEqual(records[0]["id"], ledger["searches"][0]["evidence_id"])
+            self.assertEqual("fixture", ledger["searches"][0]["fetched_at"])
+            self.assertEqual("https://example.org/source", ledger["searches"][0]["results"][0]["url"])
+            self.assertNotIn("text", ledger["searches"][0])
+
+    def test_one_evidence_recheck_can_correct_audit_without_consuming_revision(self):
+        self.automatic_fixture()
+        original_worker = self.broker.worker
+        rejected = False
+        def worker(payload, timeout, digest):
+            nonlocal rejected
+            answer = original_worker(payload, timeout, digest)
+            context = payload["input"]["context"]
+            if context["automatic_workflow"]["stage"] == "research_audit" and not rejected:
+                rejected = True
+                parsed = json.loads(answer["text"])
+                parsed["actions"][0].update(verdict="reject", notes="S1-SEARCH-01: query not executed")
+                answer["text"] = json.dumps(parsed)
+            return answer
+        self.broker.worker = worker
+        request = self.natural_request()
+        state = self.broker.workflow.load(request)
+        self.assertEqual("reviewed", state["status"])
+        self.assertEqual(1, state["artifacts"]["researcher"]["version"])
+        self.assertEqual(1, len(state["audit_rechecks"]))
+        audits = self.broker.policy.list_audit_records(request, role="auditor")
+        self.assertEqual(["reject", "pass"], [a["verdict"] for a in audits[:2]])
+
+    def test_waiting_artifact_is_repaired_before_version_or_audit_is_created(self):
+        captured = self.automatic_fixture()
+        original_worker = self.broker.worker
+        injected = False
+        def worker(payload, timeout, digest):
+            nonlocal injected
+            answer = original_worker(payload, timeout, digest)
+            parsed = json.loads(answer["text"])
+            if payload["role"] == "researcher" and any(a["tool"] == "write_artifact" for a in parsed["actions"]) and not injected:
+                injected = True
+                parsed["actions"][0]["content"] = "재검색 실행 전 대기: 지정된 첫 질의의 실제 검색 결과와 선정 경로를 확인한 뒤 갱신본을 작성한다."
+                answer["text"] = json.dumps(parsed)
+            return answer
+        self.broker.worker = worker
+        request = self.natural_request()
+        state = self.broker.workflow.load(request)
+        self.assertEqual("reviewed", state["status"])
+        self.assertEqual(1, state["artifacts"]["researcher"]["version"])
+        self.assertTrue(any(p["input"]["context"]["automatic_workflow"].get("retry_feedback", {}).get("error_code") == "AutomaticArtifactIncomplete" for p in captured))
+        self.assertEqual(1, sum(p["input"]["context"]["automatic_workflow"]["stage"] == "research_audit" for p in captured))
+
+    def test_old_search_results_authorize_revision_reads_and_other_requests_do_not(self):
+        captured = self.automatic_fixture(reject_once=True)
+        original_action = self.broker.action
+        def action(request, task, role, item):
+            result = original_action(request, task, role, item)
+            if item["tool"] == "search_web":
+                result["results"].append({"title": "Second", "url": "https://example.org/second"})
+                result["evidence_id"] = self.broker.policy.record_web_evidence(request, task, role, item["tool"], result)
+            return result
+        self.broker.action = action
+        request = self.natural_request()
+        context = next(p["input"]["context"] for p in captured if p["input"]["context"]["automatic_workflow"].get("previous_own_output") and p["role"] == "researcher")
+        state = self.broker.workflow.load(request)
+        state.update(stage="research", task=context["task"], stage_actions=[])
+        state["task"]["_delivery_envelope_id"] = self.broker.db.execute(
+            "SELECT id FROM message_envelopes WHERE request_id=? AND task_id=? AND kind='task'",
+            (request, state["task"]["task_id"])).fetchone()[0]
+        self.broker.workflow._validate_actions(state, {"message": "read remaining result", "actions": [{"tool": "read_web", "url": "https://example.org/second"}]})
+        with self.assertRaisesRegex(ValueError, "OriginalAlreadyCaptured"):
+            self.broker.workflow._validate_actions(state, {"message": "duplicate", "actions": [{"tool": "read_web", "url": "https://example.org/source"}]})
+        with self.assertRaisesRegex(ValueError, "ReadMustUseObservedSearchResult"):
+            self.broker.workflow._validate_actions(state, {"message": "unseen", "actions": [{"tool": "read_web", "url": "https://elsewhere.org/source"}]})
+        second = self.natural_request("o" * 26)
+        second_context = next(p["input"]["context"] for p in captured if p["input"]["context"]["request_id"] == second and p["input"]["context"]["automatic_workflow"]["stage"] == "plan")
+        self.assertEqual([], second_context["web_execution_evidence"]["searches"])
+
+    def test_revision_budget_failure_is_human_readable_and_not_replayed(self):
+        self.automatic_fixture(reject_once=True)
+        config = json.loads((self.root / "policy.json").read_text())
+        config["roles"]["researcher"]["limits"]["revisions"] = 0
+        (self.root / "policy.json").write_text(json.dumps(config))
+        self.broker.policy = PolicyEngine(self.root / "policy.json", self.root / "policy.sqlite")
+        request = self.natural_request()
+        state = self.broker.workflow.load(request)
+        self.assertEqual("failed", state["status"])
+        self.assertEqual({"role": "researcher", "kind": "revisions"}, state["budget_failure"])
+        self.assertEqual("failed", self.broker.policy.get_request(request)["status"])
+        self.assertTrue(any("조사 에이전트의 결과물 수정 횟수 한도" in msg for _, _, msg in self.client.posts))
+        with self.assertRaisesRegex(ValueError, "AutomaticFailedRequestCannotResume"):
+            self.broker.workflow.run(request)
+
     def test_failed_source_is_returned_to_model_for_bounded_reselection(self):
         from engine.research_team.web_tools import WebToolError
         captured = self.automatic_fixture()
@@ -734,6 +847,7 @@ class ResearchFlowTests(unittest.TestCase):
             result = original_action(request, task, role, item)
             if item["tool"] == "search_web":
                 result["results"].append({"title": "Alternative", "url": "https://example.org/alternative", "snippet": "alternative"})
+                result["evidence_id"] = self.broker.policy.record_web_evidence(request, task, role, item["tool"], result)
             return result
 
         def worker(payload, timeout, digest):

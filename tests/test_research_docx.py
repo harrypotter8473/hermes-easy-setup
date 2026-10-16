@@ -7,7 +7,7 @@ import zipfile
 from types import SimpleNamespace
 from unittest.mock import Mock
 from xml.etree import ElementTree as ET
-from engine.research_team.report_docx import build_report
+from engine.research_team.report_docx import build_report, inspect_report
 from engine.research_team.workflow import AutomaticReportWorkflow
 from engine.research_team.broker import Mattermost
 
@@ -35,6 +35,42 @@ class WordReportTests(unittest.TestCase):
         text,ref=self.fixture()
         for change in ({'sha256':'0'*64},{'role':'researcher'}):
             with self.assertRaises(ValueError): build_report(text,'req_'+'1'*32,{**ref,**change})
+
+    def test_windows_newlines_are_preserved_in_candidate_source(self):
+        text, ref = self.fixture()
+        text = text.replace('\n', '\r\n')
+        ref['sha256'] = hashlib.sha256(text.encode()).hexdigest()
+        request = 'req_'+'1'*32
+        proof = inspect_report(build_report(text, request, ref), text, request, ref)
+        self.assertTrue(proof['source_content_preserved'])
+
+    def test_preview_contains_real_word_bytes_and_exact_source_binding(self):
+        text, ref = self.fixture()
+        request = 'req_' + '1'*32
+        document = build_report(text, request, ref)
+        proof = inspect_report(document, text, request, ref)
+        self.assertTrue(proof['generated'])
+        self.assertTrue(proof['xml_structure_verified'])
+        self.assertEqual(hashlib.sha256(document).hexdigest(), proof['sha256'])
+        self.assertEqual(len(document), proof['byte_length'])
+        self.assertIn('초록만 확인', proof['visible_text'])
+        self.assertFalse(proof['visual_layout_verified'])
+        self.assertEqual('not_sent_pending_audits', proof['delivery_state'])
+        with self.assertRaises(ValueError):
+            inspect_report(document, 'different source', request, ref)
+
+    def test_delivery_must_match_final_auditors_word_candidate(self):
+        flow, state = self.flow()
+        proof = flow.prepare_report(state)
+        flow.deliver_report(state)
+        uploaded = flow.broker.client.upload_report.call_args.args[1]
+        self.assertEqual(proof['sha256'], hashlib.sha256(uploaded).hexdigest())
+        flow, state = self.flow()
+        proof = flow.prepare_report(state)
+        proof['sha256'] = '0'*64
+        with self.assertRaisesRegex(ValueError, 'ReportPreviewDeliveryBindingRejected'):
+            flow.deliver_report(state)
+        flow.broker.client.upload_report.assert_not_called()
 
     def flow(self):
         text,ref=self.fixture()

@@ -21,7 +21,8 @@ class RetryTests(unittest.TestCase):
 
     def flow(self, state):
         broker = SimpleNamespace(event=Mock(), reply=Mock(), save=Mock(), turn=Mock(), action=Mock(),
-                                 _neutralize_mentions=lambda message: message)
+                                 _neutralize_mentions=lambda message: message,
+                                 policy=SimpleNamespace(list_web_evidence=lambda request_id: []))
         flow = object.__new__(AutomaticReportWorkflow)
         flow.broker = broker
         flow.save = Mock()
@@ -57,6 +58,9 @@ class RetryTests(unittest.TestCase):
         state["read_evidence"] = ["read1"]
         self.assertIn("write_artifact", flow._context(state)["automatic_workflow"]["allowed_actions"])
         state["read_evidence"] = ["read1", "read2", "read3"]
+        flow.broker.policy.list_web_evidence = lambda request_id: [
+            {"id": str(i), "sequence": i, "task_id": "task_1", "tool": "read_web",
+             "result": {"ok": True, "url": "https://example.org/" + str(i)}} for i in range(3)]
         self.assertEqual(["write_artifact"], flow._context(state)["automatic_workflow"]["allowed_actions"])
 
     @patch("engine.research_team.workflow.time.sleep")

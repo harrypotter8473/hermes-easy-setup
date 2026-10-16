@@ -110,9 +110,12 @@ class ResearchWebToolsTests(unittest.TestCase):
     def test_explicit_arxiv_search_uses_api_and_preserves_metadata_boundary(self):
         atom = '<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>http://arxiv.org/abs/2401.01234v1</id><title>Hallucination study</title><summary>Abstract only</summary></entry></feed>'
         with patch.object(web_tools, 'fetch_public', return_value=response(atom, 'https://export.arxiv.org/api/query', 'application/atom+xml')) as fetch:
-            found = self.tools.search(self.request, self.task, 'researcher', 'site:arxiv.org hallucination')
+            found = self.tools.search(self.request, self.task, 'researcher', 'site:arxiv.org RAG hallucination')
         self.assertTrue(fetch.call_args.args[0].startswith('https://export.arxiv.org/api/query?'))
         self.assertEqual('arxiv', found['provider'])
+        self.assertEqual('site:arxiv.org RAG hallucination', found['query'])
+        self.assertEqual(fetch.call_args.args[0], found['requested_url'])
+        self.assertEqual('all:"RAG" AND all:"hallucination"', web_tools.parse_qs(web_tools.urlsplit(found['requested_url']).query)['search_query'][0])
         self.assertEqual('search_metadata_not_original_read', found['source_kind'])
         self.assertEqual('https://arxiv.org/abs/2401.01234v1', found['results'][0]['url'])
         self.assertEqual(['search_web'], [x['tool'] for x in self.policy.list_web_evidence(self.request)])

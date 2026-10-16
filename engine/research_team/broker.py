@@ -977,9 +977,9 @@ class Broker:
             if not domains:
                 raise ValueError("LiveTestSearchDomainsMissing")
             source_domain = "arxiv.org" if "*" in domains else next((domain for domain in domains if domain != "html.duckduckgo.com"), domains[0])
-            objective = (source_domain + "에서 언어 모델의 사실 오류에 관한 공개 자료 한 편을 검색하고, 초록 또는 소개 페이지를 읽어 근거 URL이 있는 짧은 요약 보고서를 작성해 주세요. 초록만 읽었으면 논문 전체를 검토했다고 쓰지 마세요.\n\n"
-                "1. 조사 담당은 실제 검색·원문 읽기를 실행하세요. 첫 검색어는 site:" + source_domain + " hallucination 으로 짧게 시작하세요.\n"
-                "2. 분석 담당은 핵심 내용을 분석하고, 감사 담당은 원문과 결과를 검증하세요.")
+            objective = ("1인 연구자의 논문 조사에 RAG를 활용할 때의 장점과 한계를 주제로 짧은 한국어 Word 보고서를 작성하세요. " + source_domain + "의 논문은 최대 2편만 선정하고 초록 또는 소개 페이지를 실제로 읽으세요. 초록만 읽었으면 논문 전체를 검토했다고 쓰지 마세요.\n\n"
+                "1. 조사 담당의 첫 검색어는 정확히 site:" + source_domain + " RAG hallucination 으로 실행하세요. 검색 후보 수와 최종 선정 논문 수를 구별하세요.\n"
+                "2. 분석 담당은 사실과 제안을 구분하고 한계를 분석하세요. 감사 담당은 원문 및 실제 검색 실행 기록에서 첫 검색어·선정 경로를 확인하고 중간·최종 감사를 수행하세요.")
             post = self.client.create_test_thread("연구팀 설치 실제 분업 테스트: " + objective)
             result["thread_root_id"] = post["id"]
             request_id = self.start_automatic_request(post,

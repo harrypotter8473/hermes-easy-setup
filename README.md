@@ -13,7 +13,7 @@
 
 연구실 마법사는 **기존 Hermes 사용**을 별도로 선택할 수 있습니다. 기존 설치를 고정 버전으로 덮어쓰지 않고 데이터·코드 경로를 확인하며, 저장된 인증을 복사하거나 새 로그인하지 않습니다. 이 모드는 사용자가 선택해 신뢰하는 로컬 소스 설치의 호환성 검사이며, 새 설치의 고정 commit·attestation 검증과는 구분됩니다. 개인 프로필·Gateway는 유지하며, 마법사가 소유한 이전 연구팀은 별도의 전환 선택으로 기록을 보존하면서 연결할 수 있습니다.
 
-0.12.0 연구실 경로는 권한·감사 중개 서비스 하나에서 프로그램이 분업 순서를 관리합니다. 총괄 계획 → 조사와 원문 확보 → 조사 중간 감사 → 분석 → 분석 중간 감사 → 총괄 종합 → 종합 중간 감사·최종 감사 순서이며, 반려되면 해당 담당자가 새 버전을 작성하고 종속 단계도 재검사합니다. 총괄 혼자 보고서를 작성하는 경로로 우회하지 않습니다. 제공된 네 페르소나 TXT 전체를 공통 규칙 중복 없이 시스템 지침으로 읽습니다.
+0.12.1 연구실 경로는 권한·감사 중개 서비스 하나에서 프로그램이 분업 순서를 관리합니다. 총괄 계획 → 조사와 원문 확보 → 조사 중간 감사 → 분석 → 분석 중간 감사 → 총괄 종합 → 종합 중간 감사·최종 감사 순서이며, 반려되면 해당 담당자가 새 버전을 작성하고 종속 단계도 재검사합니다. 총괄 혼자 보고서를 작성하는 경로로 우회하지 않습니다. 제공된 네 페르소나 TXT 전체를 공통 규칙 중복 없이 시스템 지침으로 읽습니다.
 
 조사에는 API 키가 필요 없는 DuckDuckGo 공개 검색과 HTTPS HTML·텍스트 원문 읽기가 연결됩니다. 답변·배정·결과는 같은 스레드에 남고, 봇 간 전달에는 실제 사용자 이름의 명시적 멘션이 필요하며, 관리 에이전트만 다른 봇 발언을 자동 관찰합니다. 사람의 채널 열람 권한은 바뀌지 않습니다. 설치된 모델·네 역할·검색·원문·감사·스레드 기록이 실제 테스트에서 모두 확인되어야 **사용 준비 완료**가 됩니다. 소스 ZIP 다운로드나 오프라인 테스트 통과는 각 PC의 사용 준비 완료를 뜻하지 않습니다.
 
@@ -31,7 +31,7 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 
 ## 현재 상태
 
-- 버전 `0.12.0` 자동 분업 개인 연구실용 마법사 + 기존 Windows 네이티브 사용자용·별도 관리자 테스트 마법사
+- 버전 `0.12.1` 자동 분업 개인 연구실용 마법사 + 기존 Windows 네이티브 사용자용·별도 관리자 테스트 마법사
 - 6개 화면에서 Hermes 설치·검증, Mattermost Desktop 설치·서버 등록, OpenAI Codex OAuth와 모델 선택, 독립 프로필, NetBird Dashboard, 부팅 Gateway, Bot Control 등록과 매주 업데이트까지 구성합니다.
 - 위 6개 화면은 사용자용입니다. 관리자용 서버 설치·계정 생성·Bot Control·봇/토큰 발급은 별도 `Start-HermesAdminSetup.cmd`에서 진행합니다. 프로젝트의 5단계 개발 계획과 사용자 마법사의 6개 화면은 별개입니다.
 - 봇 발급·재사용, 공유 실패 시 롤백, 사용자 봇 토큰·채널 사전 검사, 관리자용/사용자용 ZIP 분리 패키징을 지원합니다. 다른 PC에서 실제 Hermes·LLM 응답까지의 최종 승인은 [두 PC 체크리스트](docs/two-pc-checklist.ko.md)를 따라 진행해야 합니다.
@@ -53,10 +53,10 @@ Windows에서 [NousResearch Hermes Agent](https://github.com/NousResearch/hermes
 저장소 소스에서 Windows PowerShell로 실행합니다. 출력 폴더는 소스 폴더 밖의 새 경로를 지정하세요.
 
 ```powershell
-.\Build-Distributions.ps1 -DestinationRoot C:\Temp\Hermes-0.12.0
+.\Build-Distributions.ps1 -DestinationRoot C:\Temp\Hermes-0.12.1
 ```
 
-`Hermes-Research-Setup-0.12.0.zip`, `Hermes-Admin-Setup-0.12.0.zip`, `Hermes-User-Setup-0.12.0.zip`, `SHA256SUMS.txt`가 만들어집니다. Research ZIP에는 자동 분배 엔진·웹 도구·전환 코드·네 TXT·설치 중 실제 테스트가 포함되며 ZIP 안에는 파일별 `FILES.sha256`도 있습니다. 소스 허용 목록만 패키징하며 개인 설치 상태·토큰·로그·Git 기록은 포함하지 않습니다. 같은 이름의 파일은 덮어쓰지 않습니다. 생성·해시 대조·압축 해제 후 세 GUI의 비설치 검사는 `tests/Run-DistributionTests.ps1`로 실행합니다. 빌드가 GitHub 게시나 코드 서명 또는 설치 PC의 실제 분업 검증을 수행하지는 않습니다.
+`Hermes-Research-Setup-0.12.1.zip`, `Hermes-Admin-Setup-0.12.1.zip`, `Hermes-User-Setup-0.12.1.zip`, `SHA256SUMS.txt`가 만들어집니다. Research ZIP에는 자동 분배 엔진·웹 도구·전환 코드·네 TXT·설치 중 실제 테스트가 포함되며 ZIP 안에는 파일별 `FILES.sha256`도 있습니다. 소스 허용 목록만 패키징하며 개인 설치 상태·토큰·로그·Git 기록은 포함하지 않습니다. 같은 이름의 파일은 덮어쓰지 않습니다. 생성·해시 대조·압축 해제 후 세 GUI의 비설치 검사는 `tests/Run-DistributionTests.ps1`로 실행합니다. 빌드가 GitHub 게시나 코드 서명 또는 설치 PC의 실제 분업 검증을 수행하지는 않습니다.
 
 ## 빠른 시작
 

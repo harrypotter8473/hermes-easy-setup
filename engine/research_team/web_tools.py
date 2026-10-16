@@ -285,7 +285,7 @@ class WebTools:
             body, source = _decode_body(response)
             result: dict[str, Any] = {
                 "ok": True, "tool": tool, "request_id": request_id, "task_id": task_id,
-                "source_url": response["url"], "fetched_at": response["fetched_at"],
+                "source_url": response["url"], "requested_url": url, "fetched_at": response["fetched_at"],
                 "response_sha256": hashlib.sha256(body).hexdigest(),
                 "untrusted_source": True,
             }
